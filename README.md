@@ -30,44 +30,39 @@ fighting over Gboard.
 
 The strip above the keyboard. Every demo below loops on its own — no need to press play.
 
-<table>
-<tr>
-<td align="center" width="50%">
-  <img src="docs/media/clipboard.gif" width="300" alt="Clipboard vault"><br>
-  <b>📋 Clipboard</b><br>
-  Opens the clipboard vault — a history of everything you copied (text and images) with pin,
-  favourite, search and delete.
-</td>
-<td align="center" width="50%">
-  <img src="docs/media/select.gif" width="300" alt="Select"><br>
-  <b>✂️ Select</b><br>
-  A single tap selects the last word; a long-press selects everything. Opens the
-  Cut / Copy / Paste / Share bar.
-</td>
-</tr>
-<tr>
-<td align="center" width="50%">
-  <img src="docs/media/trackpad.gif" width="300" alt="Trackpad + select mode"><br>
-  <b>🕹️ Trackpad (+ 🖍️ select mode)</b><br>
-  Drag to move the cursor letter-by-letter. Turn on the pen (🖍️ select mode) and the same drag
-  highlights a selection instead.
-</td>
-<td align="center" width="50%">
-  <img src="docs/media/star.gif" width="300" alt="Text shortcut"><br>
-  <b>⭐ Text shortcut</b><br>
-  Inserts text you predefined in the app — tap inserts shortcut 1, long-press inserts shortcut 2.
-</td>
-</tr>
-<tr>
-<td align="center" width="50%">
-  <img src="docs/media/paste.gif" width="300" alt="Paste"><br>
-  <b>📥 Paste</b><br>
-  Pastes the last thing you copied. If the newest vault entry is an image or screenshot, it pastes
-  that image instead.
-</td>
-<td align="center" width="50%"></td>
-</tr>
-</table>
+### 📋 Clipboard
+
+Opens the clipboard vault — a history of everything you copied (text and images) with pin,
+favourite, search and delete.
+
+<p align="center"><img src="docs/media/clipboard.gif" width="340" alt="Clipboard vault"></p>
+
+### ✂️ Select
+
+A single tap selects the last word; a long-press selects everything. Opens the
+Cut / Copy / Paste / Share bar.
+
+<p align="center"><img src="docs/media/select.gif" width="340" alt="Select"></p>
+
+### 🕹️ Trackpad (+ 🖍️ select mode)
+
+Drag to move the cursor letter-by-letter. Turn on the pen (🖍️ select mode) and the same drag
+highlights a selection instead.
+
+<p align="center"><img src="docs/media/trackpad.gif" width="340" alt="Trackpad + select mode"></p>
+
+### ⭐ Text shortcut
+
+Inserts text you predefined in the app — tap inserts shortcut 1, long-press inserts shortcut 2.
+
+<p align="center"><img src="docs/media/star.gif" width="340" alt="Text shortcut"></p>
+
+### 📥 Paste
+
+Pastes the last thing you copied. If the newest vault entry is an image or screenshot, it pastes
+that image instead.
+
+<p align="center"><img src="docs/media/paste.gif" width="340" alt="Paste"></p>
 
 ## Requirements
 
