@@ -272,10 +272,10 @@ class ClipboardDatabase(
 
     fun getAll(sort: SortMode = SortMode.NEWEST, favoritesOnly: Boolean = false): List<Entry> {
         val order = when (sort) {
-            SortMode.NEWEST          -> "$COL_PINNED DESC, $COL_TS DESC"
-            SortMode.OLDEST          -> "$COL_PINNED DESC, $COL_TS ASC"
-            SortMode.PINNED_FIRST    -> "$COL_PINNED DESC, $COL_FAV DESC, $COL_TS DESC"
-            SortMode.FAVORITES_FIRST -> "$COL_FAV DESC, $COL_PINNED DESC, $COL_TS DESC"
+            SortMode.NEWEST          -> "$COL_PINNED DESC, $COL_TS DESC, $COL_ID DESC"
+            SortMode.OLDEST          -> "$COL_PINNED DESC, $COL_TS ASC, $COL_ID ASC"
+            SortMode.PINNED_FIRST    -> "$COL_PINNED DESC, $COL_FAV DESC, $COL_TS DESC, $COL_ID DESC"
+            SortMode.FAVORITES_FIRST -> "$COL_FAV DESC, $COL_PINNED DESC, $COL_TS DESC, $COL_ID DESC"
         }
         val favClause = if (favoritesOnly) " AND ($COL_PINNED = 1 OR $COL_FAV = 1)" else ""
         return query("WHERE $COL_DELETED = 0$favClause ORDER BY $order")
