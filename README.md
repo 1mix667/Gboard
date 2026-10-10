@@ -7,7 +7,7 @@ Gboard+ was **extracted from [Auto Expand]** so the Gboard feature lives in its 
 isolated scope, preferences and storage. Both modules can be installed at the same time without
 fighting over Gboard.
 
-> Not affiliated with Google. "Gboard" is a trademark of Google LLC. See the logo note below.
+> Not affiliated with Google. "Gboard" is a trademark of Google LLC.
 
 ---
 
@@ -80,61 +80,11 @@ that image instead.
 4. Open the **Gboard+** app. If the card says *not loaded*, tap **Force stop Gboard** (root) or
    **Open Gboard app info → Force stop**, then open the keyboard once.
 
-## Coexistence with Auto Expand
-
-Gboard+ and Auto Expand can both be installed:
-
-- Gboard+ is scoped **only** to Gboard; AE keeps SystemUI and global search.
-- All Gboard+ preferences, files, authorities and broadcast actions are namespaced `gbp_*` /
-  `io.github.kvmy666.gboardplus.*` and never touch AE's `ae_*` channels.
-- If AE's Gboard toolbar is still enabled, Gboard+ **removes AE's toolbar row in-process** so you
-  see a single bar, and shows a handoff card. With root, one tap disables AE's toggle and enables
-  Gboard+ — Gboard+ does everything AE's keyboard tweak did.
-- Gboard+ **adopts your existing clipboard vault** (`clipboard.db`) with no data loss.
-
-## Build
-
-```bash
-# JDK 17+ required
-./gradlew assembleDebug     # debug APK
-./gradlew testDebugUnitTest # unit tests
-./gradlew assembleRelease   # release APK (needs keystore.properties or KEYSTORE_* env)
-```
-
-Release signing reads `keystore.properties` at the repo root, or the `KEYSTORE_FILE`,
-`KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD` environment variables.
-
-## Project layout
-
-```
-app/                Android module (settings app + Xposed hook)
-  src/main/assets/xposed_init          → GboardPlusHook
-  src/main/res/values/arrays.xml       → xposed_scope = Gboard only
-docs/               requirements · design · database · architecture · test-plan
-logo/               Gboard-derived icon + generator (build_logo.py)
-.env                local secrets (git-ignored, never committed)
-```
-
-## Documentation
-
-- [requirements.md](docs/requirements.md) — functional + non-functional requirements
-- [design.md](docs/design.md) — UI/UX, colour system, logo
-- [database.md](docs/database.md) — ERD + schema
-- [architecture.md](docs/architecture.md) — components + sequences
-- [test-plan.md](docs/test-plan.md) — unit tests, test cases, conflict matrix
-
 ## Support & feedback
 
 - **Report a bug / ask a question:** Telegram **[@kvmy1](https://t.me/kvmy1)**
 - **Issues:** [open an issue](https://github.com/kvmy666/Gboard/issues) — include your device, Android
   version, Gboard version, and `adb logcat -s GboardPlus`.
-
-## Logo note (trademark)
-
-The launcher mark is derived from Google's Gboard application icon
-(`logo/source/res/aQv.webp`, pulled from the installed app), recoloured to `#F03971` with a `+`
-badge. It is intended for personal, non-commercial use; redistribute only if you replace the glyph
-with an original mark.
 
 ## License
 
