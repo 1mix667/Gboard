@@ -1,0 +1,50 @@
+<mxfile host="app.diagrams.net" agent="Gboard+" version="24.7.17" type="device">
+  <diagram id="gboardplus-erd" name="Gboard+ ERD">
+    <mxGraphModel dx="900" dy="600" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="850" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="tbl_entries" value="CLIPBOARD_ENTRIES" style="shape=table;startSize=26;container=1;collapsible=0;childLayout=tableLayout;fillColor=#f8d7e3;strokeColor=#F03971;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="40" y="60" width="300" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="e_id" value="id : INTEGER (PK)" style="shape=tableRow;horizontal=0;startSize=0;swimlaneHead=0;swimlaneBody=0;strokeColor=#F03971;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_entries"><mxGeometry y="26" width="300" height="24" as="geometry" /></mxCell>
+        <mxCell id="e_text" value="text : TEXT" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#F03971;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_entries"><mxGeometry y="50" width="300" height="24" as="geometry" /></mxCell>
+        <mxCell id="e_ts" value="timestamp : INTEGER" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#F03971;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_entries"><mxGeometry y="74" width="300" height="24" as="geometry" /></mxCell>
+        <mxCell id="e_pin" value="is_pinned : INTEGER" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#F03971;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_entries"><mxGeometry y="98" width="300" height="24" as="geometry" /></mxCell>
+        <mxCell id="e_fav" value="is_favorite : INTEGER" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#F03971;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_entries"><mxGeometry y="122" width="300" height="24" as="geometry" /></mxCell>
+        <mxCell id="e_kind" value="kind : INTEGER (0 text, 1 image)" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#F03971;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_entries"><mxGeometry y="146" width="300" height="24" as="geometry" /></mxCell>
+        <mxCell id="e_hash" value="image_hash : TEXT" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#F03971;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_entries"><mxGeometry y="170" width="300" height="24" as="geometry" /></mxCell>
+        <mxCell id="e_thumb" value="thumb_path : TEXT" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#F03971;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_entries"><mxGeometry y="194" width="300" height="24" as="geometry" /></mxCell>
+        <mxCell id="e_full" value="full_path : TEXT" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#F03971;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_entries"><mxGeometry y="218" width="300" height="24" as="geometry" /></mxCell>
+        <mxCell id="e_w" value="img_w : INTEGER" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#F03971;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_entries"><mxGeometry y="242" width="300" height="24" as="geometry" /></mxCell>
+        <mxCell id="e_h" value="img_h : INTEGER" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#F03971;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_entries"><mxGeometry y="266" width="300" height="24" as="geometry" /></mxCell>
+        <mxCell id="e_bytes" value="img_bytes : INTEGER" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#F03971;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_entries"><mxGeometry y="290" width="300" height="24" as="geometry" /></mxCell>
+        <mxCell id="e_anim" value="is_animated : INTEGER" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#F03971;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_entries"><mxGeometry y="314" width="300" height="24" as="geometry" /></mxCell>
+        <mxCell id="e_del" value="deleted_at : INTEGER (NULL = live)" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#F03971;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_entries"><mxGeometry y="338" width="300" height="24" as="geometry" /></mxCell>
+        <mxCell id="e_src" value="src : INTEGER (0 clip, 1 shot)" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#F03971;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_entries"><mxGeometry y="362" width="300" height="24" as="geometry" /></mxCell>
+
+        <mxCell id="tbl_meta" value="META (ae_meta)" style="shape=table;startSize=26;container=1;collapsible=0;childLayout=tableLayout;fillColor=#f8d7e3;strokeColor=#F03971;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="420" y="60" width="280" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="m_key" value="key : TEXT (PK)" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#F03971;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_meta"><mxGeometry y="26" width="280" height="24" as="geometry" /></mxCell>
+        <mxCell id="m_val" value="value : TEXT" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#F03971;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_meta"><mxGeometry y="50" width="280" height="24" as="geometry" /></mxCell>
+        <mxCell id="m_notes" value="keys: pending_delete_deadline, owner" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#F03971;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_meta"><mxGeometry y="74" width="280" height="24" as="geometry" /></mxCell>
+
+        <mxCell id="tbl_file" value="IMAGE_FILE (sidecar)" style="shape=table;startSize=26;container=1;collapsible=0;childLayout=tableLayout;fillColor=#e8eefc;strokeColor=#4285F4;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="420" y="240" width="300" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="f_path" value="rel_path : TEXT" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#4285F4;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_file"><mxGeometry y="26" width="300" height="24" as="geometry" /></mxCell>
+        <mxCell id="f_bytes" value="bytes : INTEGER" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#4285F4;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_file"><mxGeometry y="50" width="300" height="24" as="geometry" /></mxCell>
+        <mxCell id="f_note" value="ae_clipimg/{thumb,full}/&lt;sha256&gt;.webp" style="shape=tableRow;horizontal=0;startSize=0;strokeColor=#4285F4;fillColor=#ffffff;fontColor=#000000;align=left;spacingLeft=6;" vertex="1" parent="tbl_file"><mxGeometry y="74" width="300" height="24" as="geometry" /></mxCell>
+
+        <mxCell id="rel_file" value="thumb_path / full_path" style="endArrow=ERmany;html=1;strokeColor=#4285F4;fontColor=#000000;" edge="1" parent="1" source="tbl_entries" target="tbl_file">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="rel_meta" value="meta keys (no FK)" style="endArrow=none;dashed=1;html=1;strokeColor=#F03971;fontColor=#000000;" edge="1" parent="1" source="tbl_meta" target="tbl_entries">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

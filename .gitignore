@@ -1,0 +1,32 @@
+*.iml
+.gradle/
+/local.properties
+local.properties
+/.idea/
+**/.idea/
+/build/
+/app/build/
+/captures/
+.externalNativeBuild/
+.cxx/
+
+# APK / AAB
+*.apk
+*.aab
+
+# Signing
+*.jks
+*.keystore
+keystore.properties
+
+# Environment (NEVER commit)
+.env
+.env.*
+*.log
+
+# Local scratch / device dumps
+.local/
+*.db
+
+# Raw screen recordings (only the converted GIFs in docs/media/ are committed)
+docs/media/raw/

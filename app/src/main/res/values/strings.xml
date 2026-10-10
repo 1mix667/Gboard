@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Gboard+</string>
+
+    <!-- Module status -->
+    <string name="module_active">Module is active</string>
+    <string name="module_inactive">Module is not active — enable in LSPosed and reboot</string>
+
+    <!-- Toolbar -->
+    <string name="keyboard_enhancer_title">Keyboard toolbar</string>
+    <string name="keyboard_enhancer_enabled_title">Enable keyboard toolbar</string>
+    <string name="keyboard_enhancer_enabled_desc">Inject a toolbar below Gboard — force-stop Gboard to apply changes</string>
+    <string name="keyboard_toolbar_height_title">Toolbar height</string>
+    <string name="keyboard_toolbar_height_desc">Relative to key height (1.0× = same height as a key row)</string>
+    <string name="keyboard_buttons_title">TOOLBAR BUTTONS</string>
+    <string name="keyboard_button_size_title">Button size</string>
+    <string name="keyboard_button_size_desc">Scales the button width and glyph independently of the toolbar height</string>
+
+    <string name="btn_clipboard_title">📋  Clipboard</string>
+    <string name="btn_clipboard_desc">Tap to open clipboard history popup</string>
+    <string name="btn_selectall_title">⬛  Select all</string>
+    <string name="btn_selectall_desc">Tap = select last word · Long-press = select all</string>
+    <string name="btn_cursor_title">← →  Cursor navigation</string>
+    <string name="btn_cursor_desc">Jump cursor to start or end of field</string>
+    <string name="btn_selectmode_title">🖍️  Select mode</string>
+    <string name="btn_selectmode_desc">While on, dragging the stick highlights text instead of moving the cursor</string>
+    <string name="btn_trackpad_title">🕹️  Trackpad</string>
+    <string name="btn_trackpad_desc">Cursor stick with grab pop and steering ticks</string>
+    <string name="btn_shortcut_title">★  Text shortcut</string>
+    <string name="btn_shortcut_desc">Tap / long-press to insert preset text</string>
+    <string name="keyboard_shortcut1_title">Shortcut 1 — tap</string>
+    <string name="keyboard_shortcut2_title">Shortcut 2 — long press</string>
+    <string name="keyboard_shortcut2_desc">Leave empty to disable long-press shortcut</string>
+
+    <!-- Clipboard vault -->
+    <string name="clipboard_vault_title">Clipboard vault</string>
+    <string name="keyboard_clipboard_max_title">Max clipboard entries</string>
+    <string name="keyboard_clipboard_max_desc">Oldest non-pinned entries are pruned when limit is reached</string>
+    <string name="clip_full_text_title">Show full text in rows</string>
+    <string name="clip_full_text_desc">Off truncates each clipboard row to its first line</string>
+
+    <!-- Images -->
+    <string name="clip_images_title">Save copied images</string>
+    <string name="clip_images_desc">Store images you copy into the vault (opt-in)</string>
+    <string name="clip_img_max_entries_title">Max image entries</string>
+    <string name="clip_img_max_mb_title">Image vault size limit (MB)</string>
+
+    <!-- Screenshots -->
+    <string name="shot_capture_title">Auto-save screenshots</string>
+    <string name="shot_capture_desc">Capture system screenshots into the vault (needs Gboard photo access)</string>
+    <string name="shot_to_clipboard_title">Also copy screenshots to clipboard</string>
+    <string name="shot_to_clipboard_desc">Overwrites whatever you had copied — off by default</string>
+
+    <!-- Undo / haptics -->
+    <string name="undo_title">Undo</string>
+    <string name="shake_undo_title">Shake to undo</string>
+    <string name="shake_sensitivity_title">Shake sensitivity</string>
+    <string name="vibration_strength_title">Vibration strength</string>
+    <string name="trackpad_haptics_title">Trackpad haptics</string>
+    <string name="trackpad_sensitivity_title">Trackpad sensitivity</string>
+    <string name="trackpad_root_title">Root DPAD fallback</string>
+    <string name="trackpad_root_desc">Deliver cursor keys via privileged `input keyevent` for apps that swallow DPAD</string>
+
+    <!-- Gboard+ activation / liveness -->
+    <string name="gbp_loaded_title">Gboard+ is loaded in Gboard</string>
+    <string name="gbp_not_loaded_title">Gboard+ is not loaded in Gboard yet</string>
+    <string name="gbp_not_loaded_desc">Gboard must restart before the hook loads. Force-stop Gboard, then open the keyboard once.</string>
+    <string name="gbp_force_stop">Force stop Gboard</string>
+    <string name="gbp_force_stop_root">Force stop Gboard (root)</string>
+    <string name="gbp_open_app_info">Open Gboard app info</string>
+    <string name="gbp_recheck">Re-check</string>
+
+    <!-- Conflict / handoff -->
+    <string name="ae_detected_title">Auto Expand\u2019s Gboard tweak is active</string>
+    <string name="ae_detected_desc">Gboard+ and Auto Expand both add a toolbar. Turn Auto Expand\u2019s keyboard toolbar off so Gboard+ can take over — Gboard+ does everything it did.</string>
+    <string name="ae_disable_root">Disable it for me (root)</string>
+    <string name="ae_open_settings">Open Auto Expand</string>
+    <string name="ae_handoff_done">Auto Expand\u2019s Gboard tweak is off — Gboard+ is in charge.</string>
+
+    <string name="reboot_required">Reboot required for changes to take effect</string>
+</resources>
