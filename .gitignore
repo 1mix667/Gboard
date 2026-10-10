@@ -18,6 +18,8 @@ local.properties
 *.jks
 *.keystore
 keystore.properties
+keystore.b64
+*.b64
 
 # Environment (NEVER commit)
 .env
