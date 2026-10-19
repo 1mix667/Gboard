@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Gboard+ only ever hooks Gboard. Auto Expand keeps SystemUI + global search. -->
+    <string-array name="xposed_scope">
+        <item>com.google.android.inputmethod.latin</item>
+    </string-array>
+</resources>

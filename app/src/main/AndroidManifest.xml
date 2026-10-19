@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:name=".App"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:theme="@style/Theme.GboardPlus">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Read-only prefs mirror, isolated from Auto Expand's authority.
+             forceQueryable lets Gboard's process read it despite Android 11+ package
+             visibility (the hook is injected into Gboard, which can't see this app). -->
+        <provider
+            android:name=".GbpPrefsProvider"
+            android:authorities="io.github.imix667.gboardplus.prefs"
+            android:exported="true"
+            android:forceQueryable="true" />
+
+        <!-- Xposed module marker -->
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+
+        <meta-data
+            android:name="xposeddescription"
+            android:value="Gboard+ — a Gboard toolbar with clipboard vault (text + images), shortcuts, cursor tools, trackpad and select mode. Extracted from Auto Expand; coexists with it safely." />
+
+        <meta-data
+            android:name="xposedminversion"
+            android:value="82" />
+
+        <meta-data
+            android:name="xposedscope"
+            android:resource="@array/xposed_scope" />
+
+        <!-- Answers the hook's ordered-broadcast request for prefs (works despite package
+             visibility, unlike a ContentProvider query from Gboard's process). -->
+        <receiver
+            android:name=".GbpPrefsReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="io.github.imix667.gboardplus.PREFS_REQ" />
+            </intent-filter>
+        </receiver>
+    </application>
+
+</manifest>
