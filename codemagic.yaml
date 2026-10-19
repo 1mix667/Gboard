@@ -1,0 +1,32 @@
+# Codemagic — тестовый APK Gboard+ Game Mode (1mix667/Gboard, ветка game-test).
+# Подключение: codemagic.io → Add application → GitHub → 1mix667/Gboard →
+# "Use codemagic.yaml" → ветка game-test → запустить workflow android-debug.
+# APK придёт письмом и будет в артефактах сборки.
+#
+# Требования: AGP 8.x (JDK 17), compileSdk/targetSdk 36, minSdk 35.
+# Debug-сборка подписана debug-ключом — ставится поверх ничего, конфликтов нет
+# (пакет io.github.imix667.gboardplus, не пересекается с оригиналом).
+
+workflows:
+  android-debug:
+    name: Gboard+ — Debug APK (game test)
+    instance_type: linux_x2
+    max_build_duration: 60
+    environment:
+      java: 17
+    scripts:
+      - name: Проверить Android SDK 36
+        script: |
+          set -e
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" || true
+      - name: Gradle assembleDebug
+        script: |
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --no-daemon -x lint
+      - name: Переименовать APK
+        script: |
+          mkdir -p apk-artifacts
+          cp app/build/outputs/apk/debug/app-debug.apk apk-artifacts/GboardPlus-game1.apk
+          ls -lh apk-artifacts/GboardPlus-game1.apk
+    artifacts:
+      - apk-artifacts/GboardPlus-game1.apk
