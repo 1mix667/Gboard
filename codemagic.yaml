@@ -15,10 +15,10 @@ workflows:
     environment:
       java: 17
     scripts:
-      - name: Проверить Android SDK 36
+      - name: Проверить Android SDK 36, CMake и NDK
         script: |
           set -e
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "cmake;3.22.1" "ndk;28.2.13676358" || true
       - name: Gradle assembleDebug
         script: |
           chmod +x gradlew
@@ -26,7 +26,7 @@ workflows:
       - name: Переименовать APK
         script: |
           mkdir -p apk-artifacts
-          cp app/build/outputs/apk/debug/app-debug.apk apk-artifacts/GboardPlus-game1.apk
-          ls -lh apk-artifacts/GboardPlus-game1.apk
+          cp app/build/outputs/apk/debug/app-debug.apk apk-artifacts/GboardPlus-game2.apk
+          ls -lh apk-artifacts/GboardPlus-game2.apk
     artifacts:
-      - apk-artifacts/GboardPlus-game1.apk
+      - apk-artifacts/GboardPlus-game2.apk
