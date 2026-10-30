@@ -333,6 +333,9 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
     //  • PANEL_WIN — compact 100% Windows keyboard: genuine ACTION_DOWN on
     //    finger-down / ACTION_UP on finger-up via the InputConnection, with
     //    latched Ctrl/Win/Alt/Shift modifiers (tap = stays on until tapped off).
+    // Both panels also drive the daemon's virtual "Gboard+ Mouse": ЛКМ/ПКМ
+    // hold-buttons (pad center column; Win panel bottom row) and, in
+    // PANEL_WIN, a touchpad (drag = relative pointer move, tap = left click).
     private val PANEL_NONE = 0
     private val PANEL_PAD = 1
     private val PANEL_WIN = 2
@@ -341,7 +344,7 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
     private val GAME_PANEL_TAG = "gbp_game_panel"
     private val WIN_PANEL_TAG = "gbp_win_panel"
     private val PAD_PANEL_HEIGHT_DP = 258f
-    private val WIN_PANEL_HEIGHT_DP = 218f
+    private val WIN_PANEL_HEIGHT_DP = 272f
     private val heldKeys = mutableMapOf<Int, Long>()          // keyCode -> downTime (synchronized)
     // Toolbar toggle views (latest built toolbar) for alpha refresh on mode change.
     @Volatile private var padToggleView: View? = null
@@ -2371,6 +2374,47 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
         }
     }
 
+    /** Mouse button (GamepadProto.MOUSE_*) via the daemon's virtual mouse.
+     *  The bit is recorded in state even before the link is up, so it syncs
+     *  on connect like the pad buttons do. */
+    private fun padSetMouseButton(bit: Int, down: Boolean) {
+        synchronized(padLock) {
+            val c = padClient
+            if (c == null) {
+                padState.mouseBtns = if (down) padState.mouseBtns or (1 shl bit)
+                else padState.mouseBtns and (1 shl bit).inv()
+                padEnsureClient()
+                return
+            }
+            c.setMouseButton(padState, bit, down)
+        }
+    }
+
+    /** Relative pointer move via the virtual mouse. Dropped while the link
+     *  is down (stale deltas must never replay after a reconnect). */
+    private fun padMoveMouse(dx: Int, dy: Int) {
+        synchronized(padLock) {
+            val c = padClient
+            if (c == null || !c.connected) {
+                padEnsureClient()
+                return
+            }
+            c.moveMouse(padState, dx, dy)
+        }
+    }
+
+    /** Wheel step via the virtual mouse (sign = direction). */
+    private fun padWheelMouse(n: Int) {
+        synchronized(padLock) {
+            val c = padClient
+            if (c == null || !c.connected) {
+                padEnsureClient()
+                return
+            }
+            c.wheelMouse(padState, n)
+        }
+    }
+
     /** Zero everything (mode off / keyboard hidden) so nothing stays held. */
     private fun padResetAll() {
         synchronized(padLock) {
@@ -2461,6 +2505,88 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
         }
     }
 
+    /** Touchpad for the Windows panel: one-finger drag moves the host
+     *  pointer (touch deltas scaled ×1.5, sent as they come, including
+     *  batched historical samples); a short tap without movement is a left
+     *  click. Movement goes through the daemon link (virtual "Gboard+
+     *  Mouse"), NOT the InputConnection. Single-pointer by design. */
+    private inner class TouchpadView(ctx: Context) : View(ctx) {
+        var onDelta: ((Int, Int) -> Unit)? = null
+        var onTap: (() -> Unit)? = null
+        private var pointerId = -1
+        private var lastX = 0f
+        private var lastY = 0f
+        private var accX = 0f
+        private var accY = 0f
+        private var downTime = 0L
+        private var downX = 0f
+        private var downY = 0f
+        private var moved = false
+
+        init {
+            val dp = resources.displayMetrics.density
+            background = GradientDrawable().apply {
+                cornerRadius = 10f * dp
+                setColor(Color.parseColor("#17171F"))
+                setStroke((2f * dp).toInt(), Color.parseColor("#3A3A4A"))
+            }
+            isClickable = true
+            isFocusable = false
+        }
+
+        private fun feed(x: Float, y: Float) {
+            val dp = resources.displayMetrics.density
+            if (!moved && kotlin.math.abs(x - downX) + kotlin.math.abs(y - downY) > 8f * dp) {
+                moved = true
+            }
+            accX += (x - lastX) * 1.5f
+            accY += (y - lastY) * 1.5f
+            lastX = x; lastY = y
+            val dx = accX.toInt(); val dy = accY.toInt()
+            if (dx != 0 || dy != 0) {
+                accX -= dx; accY -= dy
+                onDelta?.invoke(dx, dy)
+            }
+        }
+
+        override fun onTouchEvent(ev: MotionEvent): Boolean {
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    pointerId = ev.getPointerId(0)
+                    lastX = ev.x; lastY = ev.y
+                    downX = ev.x; downY = ev.y
+                    accX = 0f; accY = 0f
+                    downTime = SystemClock.uptimeMillis()
+                    moved = false
+                    return true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (pointerId < 0) return true
+                    val idx = ev.findPointerIndex(pointerId)
+                    if (idx < 0) return true
+                    for (h in 0 until ev.historySize) {
+                        feed(ev.getHistoricalX(idx, h), ev.getHistoricalY(idx, h))
+                    }
+                    feed(ev.getX(idx), ev.getY(idx))
+                    return true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!moved && SystemClock.uptimeMillis() - downTime < 300L) {
+                        performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        onTap?.invoke()
+                    }
+                    pointerId = -1
+                    return true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    pointerId = -1
+                    return true
+                }
+            }
+            return super.onTouchEvent(ev)
+        }
+    }
+
     /** The Xbox gamepad panel (v2 — replaces the WASD pad). Two zones:
      *  left = LB/LT + left stick + D-pad + L3; right = RB/RT + ABXY +
      *  right stick + R3; a narrow center column holds Back/Start + status. */
@@ -2546,6 +2672,20 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
             panelHoldButton(ctx, "START", 11f, false,
                 { padSetButton(GamepadProto.BTN_START, true) }, { padSetButton(GamepadProto.BTN_START, false) }),
             cBtnLp())
+        // Mouse buttons — the survey marked ЛКМ+ПКМ mandatory. They ride the
+        // same daemon link as the pad (virtual "Gboard+ Mouse").
+        val mouseRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        mouseRow.addView(
+            panelHoldButton(ctx, "ЛКМ", 10f, false,
+                { padSetMouseButton(GamepadProto.MOUSE_LEFT, true) },
+                { padSetMouseButton(GamepadProto.MOUSE_LEFT, false) }),
+            btnLp(1f, 30f))
+        mouseRow.addView(
+            panelHoldButton(ctx, "ПКМ", 10f, false,
+                { padSetMouseButton(GamepadProto.MOUSE_RIGHT, true) },
+                { padSetMouseButton(GamepadProto.MOUSE_RIGHT, false) }),
+            btnLp(1f, 30f))
+        center.addView(mouseRow, rowLp(36f))
         panel.addView(center, colLp(0.62f))
 
         // ── Right zone ──
@@ -2740,6 +2880,30 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
             key("Space", KeyEvent.KEYCODE_SPACE, 4.2f, 11f),
             key("◀", KeyEvent.KEYCODE_DPAD_LEFT), key("▲", KeyEvent.KEYCODE_DPAD_UP),
             key("▼", KeyEvent.KEYCODE_DPAD_DOWN), key("▶", KeyEvent.KEYCODE_DPAD_RIGHT))
+        // Mouse zone (~25% of panel height): touchpad with hold ЛКМ/ПКМ on
+        // the sides. Mouse input rides the daemon link (virtual "Gboard+
+        // Mouse") — tap on the pad = left click, drag = pointer move.
+        val mouseRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        mouseRow.addView(
+            panelHoldButton(ctx, "ЛКМ", 11f, false,
+                { padSetMouseButton(GamepadProto.MOUSE_LEFT, true) },
+                { padSetMouseButton(GamepadProto.MOUSE_LEFT, false) }),
+            keyLp(0.85f))
+        val touchpad = TouchpadView(ctx)
+        touchpad.onDelta = { dx, dy -> padMoveMouse(dx, dy) }
+        touchpad.onTap = {
+            padSetMouseButton(GamepadProto.MOUSE_LEFT, true)
+            padSetMouseButton(GamepadProto.MOUSE_LEFT, false)
+        }
+        touchpad.layoutParams = keyLp(3.4f)
+        mouseRow.addView(touchpad)
+        mouseRow.addView(
+            panelHoldButton(ctx, "ПКМ", 11f, false,
+                { padSetMouseButton(GamepadProto.MOUSE_RIGHT, true) },
+                { padSetMouseButton(GamepadProto.MOUSE_RIGHT, false) }),
+            keyLp(0.85f))
+        panel.addView(mouseRow, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, (64f * dp).toInt()))
 
         winLatchPainters = painters
         return panel
@@ -2783,6 +2947,10 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
             if (mode == PANEL_PAD) {
                 padEnsureClient()
                 padRefreshStatus()
+            }
+            if (mode == PANEL_WIN) {
+                // The Win panel's touchpad + mouse buttons ride the daemon link.
+                padEnsureClient()
             }
             if (mode == PANEL_NONE) {
                 gameReleaseAll(ims)

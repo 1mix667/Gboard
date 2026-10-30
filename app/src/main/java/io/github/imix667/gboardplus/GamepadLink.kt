@@ -10,15 +10,17 @@ import java.nio.ByteOrder
 
 /**
  * Wire protocol shared with the native gamepadd daemon (cpp/gamepadd.c):
- * one fixed 16-byte little-endian frame per state change over the abstract
- * local socket [GamepadProto.SOCKET_NAME]. The daemon turns frames into
- * input_events on a virtual "Microsoft X-Box 360 pad" (/dev/uinput), which
- * Parsec picks up as a real controller.
+ * one fixed 24-byte little-endian frame (v2) per state change over the
+ * abstract local socket [GamepadProto.SOCKET_NAME]. Bytes 0..15 are the
+ * gamepad state; bytes 16..23 are the mouse section (button bitmask +
+ * one-shot relative deltas). The daemon turns frames into input_events on
+ * a virtual "Microsoft X-Box 360 pad" and a virtual "Gboard+ Mouse"
+ * (/dev/uinput), which Parsec picks up as real hardware.
  */
 object GamepadProto {
     const val SOCKET_NAME = "gbp_gamepad"
     const val ASSET_NAME = "gamepadd"
-    const val FRAME_SIZE = 16
+    const val FRAME_SIZE = 24
 
     // Button bit indices (daemon maps them to BTN_SOUTH/EAST/... in order).
     const val BTN_A = 0
@@ -32,6 +34,11 @@ object GamepadProto {
     const val BTN_GUIDE = 8
     const val BTN_L3 = 9
     const val BTN_R3 = 10
+
+    // Mouse button bit indices (daemon maps them to BTN_LEFT/RIGHT/MIDDLE).
+    const val MOUSE_LEFT = 0
+    const val MOUSE_RIGHT = 1
+    const val MOUSE_MIDDLE = 2
 }
 
 /** Mutable snapshot of the whole pad; serialized by [toFrame]. */
@@ -45,10 +52,18 @@ class PadState {
     var rt: Int = 0               // 0..255
     var hatX: Int = 0             // -1/0/1
     var hatY: Int = 0             // -1/0/1
+    // Mouse section (frame v2). Buttons are state; rel/wheel are PENDING
+    // one-shot deltas — GamepadClient.send() zeroes them after a successful
+    // write so a later frame never re-sends the same movement.
+    var mouseBtns: Int = 0        // bitmask of GamepadProto.MOUSE_*
+    var relX: Int = 0             // pending relative delta, -32768..32767
+    var relY: Int = 0
+    var wheel: Int = 0            // pending wheel delta, -128..127
 
     fun reset() {
         buttons = 0; lx = 0; ly = 0; rx = 0; ry = 0
         lt = 0; rt = 0; hatX = 0; hatY = 0
+        mouseBtns = 0; relX = 0; relY = 0; wheel = 0
     }
 
     fun toFrame(): ByteArray {
@@ -62,6 +77,12 @@ class PadState {
         buf.put(rt.coerceIn(0, 255).toByte())
         buf.put(hatX.coerceIn(-1, 1).toByte())
         buf.put(hatY.coerceIn(-1, 1).toByte())
+        buf.put(mouseBtns.coerceIn(0, 255).toByte())
+        buf.put(0) // pad
+        buf.putShort(relX.coerceIn(-32768, 32767).toShort())
+        buf.putShort(relY.coerceIn(-32768, 32767).toShort())
+        buf.put(wheel.coerceIn(-128, 127).toByte())
+        buf.put(0) // pad
         return buf.array()
     }
 }
@@ -112,7 +133,9 @@ class GamepadClient {
         try { onConnectionChanged?.invoke(v) } catch (_: Throwable) {}
     }
 
-    /** Send one state frame. Drops silently when not connected. */
+    /** Send one state frame. Drops silently when not connected. A successful
+     *  write consumes the pending mouse deltas in [state] (they are one-shot
+     *  events, not state), so no later frame can re-send them. */
     fun send(state: PadState) {
         if (!connected) return
         val frame = state.toFrame()
@@ -121,12 +144,47 @@ class GamepadClient {
                 val out = socket?.outputStream ?: throw IllegalStateException("no socket")
                 out.write(frame)
                 out.flush()
+                state.relX = 0
+                state.relY = 0
+                state.wheel = 0
             } catch (_: Throwable) {
                 try { socket?.close() } catch (_: Throwable) {}
                 socket = null
                 setConnected(false)
             }
         }
+    }
+
+    // ── Mouse API for the panels ──────────────────────────────────────
+    // Each call mutates [state] and pushes a frame immediately. Callers
+    // hold the same lock they use for the pad setters (padLock in the hook).
+
+    /** Press/release one mouse button (GamepadProto.MOUSE_*). The button
+     *  bit lives in [state] even while disconnected, so it re-syncs on the
+     *  next connect exactly like the pad buttons do. */
+    fun setMouseButton(state: PadState, bit: Int, pressed: Boolean) {
+        state.mouseBtns = if (pressed) state.mouseBtns or (1 shl bit)
+        else state.mouseBtns and (1 shl bit).inv()
+        send(state)
+    }
+
+    /** Queue a relative pointer move and send it now. Deltas are dropped
+     *  while disconnected — replaying stale movement after a reconnect
+     *  would make the host cursor jump. */
+    fun moveMouse(state: PadState, dx: Int, dy: Int) {
+        if (!connected) return
+        if (dx == 0 && dy == 0) return
+        state.relX = (state.relX + dx).coerceIn(-32768, 32767)
+        state.relY = (state.relY + dy).coerceIn(-32768, 32767)
+        send(state)
+    }
+
+    /** Queue a wheel step (sign = direction) and send it now. */
+    fun wheelMouse(state: PadState, n: Int) {
+        if (!connected) return
+        if (n == 0) return
+        state.wheel = (state.wheel + n).coerceIn(-128, 127)
+        send(state)
     }
 
     fun close() {

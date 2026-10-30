@@ -3,7 +3,7 @@
 // sees genuine "Microsoft X-Box 360 pad" hardware instead of injected keys.
 //
 // Transport: abstract-namespace local socket "gbp_gamepad".
-// Protocol: fixed 16-byte little-endian frames, one per state change:
+// Protocol v2: fixed 24-byte little-endian frames, one per state change:
 //   [0..3]   uint32  button bitmask (bits = GamepadProto.BTN_*)
 //   [4..5]   int16   left stick X   (-32768..32767)
 //   [6..7]   int16   left stick Y
@@ -13,9 +13,20 @@
 //   [13]     uint8   RT axis (ABS_RZ, 0..255)
 //   [14]     int8    D-pad hat X (ABS_HAT0X, -1/0/1)
 //   [15]     int8    D-pad hat Y (ABS_HAT0Y, -1/0/1)
+//   [16]     uint8   mouse button bitmask (bit0=BTN_LEFT, bit1=BTN_RIGHT,
+//                    bit2=BTN_MIDDLE) — routed to the virtual mouse below
+//   [17]     uint8   pad
+//   [18..19] int16   mouse relative X delta
+//   [20..21] int16   mouse relative Y delta
+//   [22]     int8    mouse wheel delta
+//   [23]     uint8   pad
 // The daemon diffs each frame against the previous one and emits only the
-// changed input_events + SYN_REPORT. When a client disconnects, the state is
-// zeroed so nothing can stay stuck "pressed" on the host PC.
+// changed input_events + SYN_REPORT. Mouse relative deltas are NOT state:
+// they are emitted as-is from the frame and then forgotten (zeroed in the
+// stored state), so a later unrelated frame can never re-send them.
+// A second uinput device, "Gboard+ Mouse", carries the mouse events.
+// When a client disconnects, the state is zeroed so nothing can stay stuck
+// "pressed" on the host PC.
 //
 // Run as root (su). Optional arg --daemonize detaches via daemon(0, 0).
 
@@ -45,7 +56,7 @@
 #endif
 
 #define SOCK_NAME "gbp_gamepad"
-#define FRAME_SIZE 16
+#define FRAME_SIZE 24
 
 // Button bit index -> evdev key code. Order must match GamepadProto.BTN_*.
 static const int kKeyForBit[11] = {
@@ -62,11 +73,23 @@ static const int kKeyForBit[11] = {
     BTN_THUMBR, // 10 R3
 };
 
+// Mouse button bit index -> evdev key code (frame v2 mouse section).
+static const int kMouseKeyForBit[3] = {
+    BTN_LEFT,   // 0 ЛКМ
+    BTN_RIGHT,  // 1 ПКМ
+    BTN_MIDDLE, // 2 СКМ
+};
+
 typedef struct __attribute__((packed)) {
     uint32_t buttons;
     int16_t lx, ly, rx, ry;
     uint8_t lt, rt;
     int8_t hatx, haty;
+    uint8_t mouse_btns;
+    uint8_t pad0;
+    int16_t rel_x, rel_y;
+    int8_t wheel;
+    uint8_t pad1;
 } Frame;
 
 _Static_assert(sizeof(Frame) == FRAME_SIZE, "frame layout drift");
@@ -137,6 +160,46 @@ static int create_device(void) {
     return fd;
 }
 
+// Create the virtual mouse "Gboard+ Mouse". Returns uinput fd or -1.
+static int create_mouse_device(void) {
+    int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
+    if (fd < 0) {
+        LOGE("open /dev/uinput (mouse) failed: %s", strerror(errno));
+        return -1;
+    }
+
+    ioctl(fd, UI_SET_EVBIT, EV_SYN);
+    ioctl(fd, UI_SET_EVBIT, EV_KEY);
+    ioctl(fd, UI_SET_EVBIT, EV_REL);
+
+    for (int i = 0; i < 3; i++) ioctl(fd, UI_SET_KEYBIT, kMouseKeyForBit[i]);
+    ioctl(fd, UI_SET_RELBIT, REL_X);
+    ioctl(fd, UI_SET_RELBIT, REL_Y);
+    ioctl(fd, UI_SET_RELBIT, REL_WHEEL);
+
+    struct uinput_user_dev dev;
+    memset(&dev, 0, sizeof(dev));
+    snprintf(dev.name, UINPUT_MAX_NAME_SIZE, "Gboard+ Mouse");
+    dev.id.bustype = BUS_USB;
+    dev.id.vendor = 0;
+    dev.id.product = 0;
+    dev.id.version = 0;
+
+    if (write(fd, &dev, sizeof(dev)) != (ssize_t)sizeof(dev)) {
+        LOGE("write mouse uinput_user_dev failed: %s", strerror(errno));
+        close(fd);
+        return -1;
+    }
+    if (ioctl(fd, UI_DEV_CREATE) < 0) {
+        LOGE("UI_DEV_CREATE (mouse) failed: %s", strerror(errno));
+        close(fd);
+        return -1;
+    }
+    usleep(200 * 1000);
+    LOGI("virtual mouse created");
+    return fd;
+}
+
 // Emit the diff between prev and cur, then SYN_REPORT. Updates *prev.
 static void apply_frame(int fd, const Frame *cur, Frame *prev) {
     int dirty = 0;
@@ -166,6 +229,35 @@ static void apply_frame(int fd, const Frame *cur, Frame *prev) {
 #undef AXIS
     if (dirty) emit_event(fd, EV_SYN, SYN_REPORT, 0);
     *prev = *cur;
+}
+
+// Mouse half of a frame: buttons are diffed like the pad's; the relative
+// deltas are emitted verbatim and then zeroed in the stored state so they
+// fire exactly once.
+static void apply_mouse_frame(int fd, const Frame *cur, Frame *prev) {
+    int dirty = 0;
+    for (int i = 0; i < 3; i++) {
+        int now = (int)((cur->mouse_btns >> i) & 1u);
+        int was = (int)((prev->mouse_btns >> i) & 1u);
+        if (now != was) {
+            emit_event(fd, EV_KEY, (uint16_t)kMouseKeyForBit[i], now);
+            dirty = 1;
+        }
+    }
+    if (cur->rel_x != 0) { emit_event(fd, EV_REL, REL_X, cur->rel_x); dirty = 1; }
+    if (cur->rel_y != 0) { emit_event(fd, EV_REL, REL_Y, cur->rel_y); dirty = 1; }
+    if (cur->wheel != 0) { emit_event(fd, EV_REL, REL_WHEEL, cur->wheel); dirty = 1; }
+    if (dirty) emit_event(fd, EV_SYN, SYN_REPORT, 0);
+    *prev = *cur;
+    prev->rel_x = 0;
+    prev->rel_y = 0;
+    prev->wheel = 0;
+}
+
+// Apply one frame to both virtual devices (pad + mouse).
+static void apply_both(int pad_fd, int mouse_fd, const Frame *cur, Frame *state) {
+    apply_frame(pad_fd, cur, state);
+    apply_mouse_frame(mouse_fd, cur, state);
 }
 
 static int make_server_socket(void) {
@@ -207,8 +299,17 @@ int main(int argc, char **argv) {
     int uinput = create_device();
     if (uinput < 0) return 1;
 
+    int mouse = create_mouse_device();
+    if (mouse < 0) {
+        ioctl(uinput, UI_DEV_DESTROY);
+        close(uinput);
+        return 1;
+    }
+
     int server = make_server_socket();
     if (server < 0) {
+        ioctl(mouse, UI_DEV_DESTROY);
+        close(mouse);
         ioctl(uinput, UI_DEV_DESTROY);
         close(uinput);
         return 1;
@@ -239,7 +340,7 @@ int main(int argc, char **argv) {
             if (have == FRAME_SIZE) {
                 Frame cur;
                 memcpy(&cur, buf, FRAME_SIZE);
-                apply_frame(uinput, &cur, &state);
+                apply_both(uinput, mouse, &cur, &state);
                 have = 0;
             }
         }
@@ -247,13 +348,15 @@ int main(int argc, char **argv) {
         LOGI("client disconnected — zeroing state");
         Frame zero;
         memset(&zero, 0, sizeof(zero));
-        apply_frame(uinput, &zero, &state);
+        apply_both(uinput, mouse, &zero, &state);
     }
 
     Frame zero;
     memset(&zero, 0, sizeof(zero));
-    apply_frame(uinput, &zero, &state);
+    apply_both(uinput, mouse, &zero, &state);
     close(server);
+    ioctl(mouse, UI_DEV_DESTROY);
+    close(mouse);
     ioctl(uinput, UI_DEV_DESTROY);
     close(uinput);
     LOGI("bye");
