@@ -21,10 +21,21 @@ android {
         applicationId = "io.github.imix667.gboardplus"
         minSdk = 35
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.1.0-game1"
+        versionCode = 3
+        versionName = "1.2.0-game2"
         ndk {
             abiFilters += "arm64-v8a"
+        }
+        externalNativeBuild {
+            cmake {
+                cFlags += "-std=c11"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
         }
     }
 
@@ -93,6 +104,28 @@ android {
         abortOnError = false
     }
 }
+
+// ── Gamepad daemon (cpp/gamepadd.c) ──────────────────────────────────────
+// CMake builds the daemon as a plain executable named "gamepadd" (no .so
+// suffix, so AGP does not stage it into jniLibs). The app needs it in
+// assets/ instead: MainActivity extracts assets/gamepadd to filesDir and
+// starts it via su. Copy the CMake output into a generated assets dir.
+val gamepadAssetsDir = layout.buildDirectory.dir("generated/gamepadAssets")
+android.sourceSets.getByName("main").assets.srcDir(gamepadAssetsDir)
+
+val copyGamepadDaemon = tasks.register<Copy>("copyGamepadDaemon") {
+    dependsOn("externalNativeBuildDebug", "externalNativeBuildRelease")
+    from(fileTree(layout.buildDirectory.dir("intermediates/cmake")) {
+        include("**/gamepadd")
+    })
+    into(gamepadAssetsDir)
+    // debug/ and release/ obj dirs both yield a "gamepadd" — flatten to
+    // assets/gamepadd (identical source, either build variant is fine).
+    eachFile { relativePath = org.gradle.api.file.RelativePath(true, name) }
+    duplicatesStrategy = org.gradle.api.file.DuplicatesStrategy.INCLUDE
+}
+tasks.matching { it.name == "mergeDebugAssets" || it.name == "mergeReleaseAssets" }
+    .configureEach { dependsOn(copyGamepadDaemon) }
 
 dependencies {
     compileOnly(libs.xposed.api)

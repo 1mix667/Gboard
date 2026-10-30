@@ -324,15 +324,42 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
     @Volatile private var toolbarView: View? = null       // anchor for the centered alert
     @Volatile private var undoAlertShowing = false
 
-    // ── Game mode (🎮) — TEST BUILD ──
-    // Separate WASD hold-panel for Parsec gaming. Normal Gboard typing is untouched:
-    // the panel only appears when the user taps 🎮, and hides Gboard's key grid while on.
-    // Keys are sent as genuine ACTION_DOWN on finger-down / ACTION_UP on finger-up via
-    // the InputConnection, so games see a real held key instead of a one-step tap.
-    @Volatile private var gameModeOn = false
+    // ── Panels (🎮 gamepad / Win keys) — v2 ──
+    // Two extra panels replace Gboard's key grid while active; normal typing is
+    // untouched and both modes exit back to the regular keyboard:
+    //  • PANEL_PAD — Xbox gamepad panel. Input goes to the root gamepadd daemon
+    //    (see GamepadLink.kt), which exposes a REAL virtual "Microsoft X-Box 360
+    //    pad" on /dev/uinput — Parsec sees actual controller hardware.
+    //  • PANEL_WIN — compact 100% Windows keyboard: genuine ACTION_DOWN on
+    //    finger-down / ACTION_UP on finger-up via the InputConnection, with
+    //    latched Ctrl/Win/Alt/Shift modifiers (tap = stays on until tapped off).
+    private val PANEL_NONE = 0
+    private val PANEL_PAD = 1
+    private val PANEL_WIN = 2
+    @Volatile private var panelMode = PANEL_NONE
     @Volatile private var gameContentRef: ViewGroup? = null  // keyboard content layout of the live input view
     private val GAME_PANEL_TAG = "gbp_game_panel"
+    private val WIN_PANEL_TAG = "gbp_win_panel"
+    private val PAD_PANEL_HEIGHT_DP = 258f
+    private val WIN_PANEL_HEIGHT_DP = 218f
     private val heldKeys = mutableMapOf<Int, Long>()          // keyCode -> downTime (synchronized)
+    // Toolbar toggle views (latest built toolbar) for alpha refresh on mode change.
+    @Volatile private var padToggleView: View? = null
+    @Volatile private var winToggleView: View? = null
+    // Gamepad link + state (PANEL_PAD)
+    private val padState = PadState()
+    private val padLock = Any()
+    @Volatile private var padClient: GamepadClient? = null
+    @Volatile private var padStatusView: TextView? = null
+    @Volatile private var padLastConnectTryMs = 0L
+    private val dpadHeld = BooleanArray(4)                    // U, D, L, R
+    // Windows-keyboard modifier latch (PANEL_WIN): modifier keycodes latched on.
+    private val winLatch = mutableSetOf<Int>()
+    private var winLatchPainters: List<() -> Unit> = emptyList()
+    private val WIN_MOD_ORDER = intArrayOf(
+        KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.KEYCODE_ALT_LEFT,
+        KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.KEYCODE_META_LEFT
+    )
     // Lazy: must NOT touch the framework at class-construction time. LSPosed instantiates
     // this hook class during load; an eager Handler(Looper.getMainLooper()) here can throw
     // and abort the whole module load (→ no toolbar). Created on first shake instead.
@@ -765,13 +792,15 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         unregisterShake()
-                        // Game mode: keyboard hiding must never leave a key stuck down.
+                        // Panels: keyboard hiding must never leave a key stuck
+                        // down or the virtual pad holding a button.
                         try {
                             val ims2 = param.thisObject as? InputMethodService
                             if (ims2 != null) gameReleaseAll(ims2)
                         } catch (_: Throwable) {}
-                        if (gameModeOn) {
-                            gameModeOn = false
+                        if (panelMode != PANEL_NONE) {
+                            panelMode = PANEL_NONE
+                            padResetAll()
                             gameContentRef = null
                         }
                     }
@@ -1194,11 +1223,12 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
                                 ViewGroup.LayoutParams.MATCH_PARENT, initialHeight
                             ))
 
-                            // Game mode: remember this input view's container and re-apply
-                            // the mode if it was on (Gboard rebuilds the view on app switch).
+                            // Panels: remember this input view's container and
+                            // re-apply the active panel (Gboard rebuilds the view
+                            // on app switch).
                             gameContentRef = contentLayout
-                            if (gameModeOn) {
-                                try { setGameMode(ctx, ims, true) } catch (_: Throwable) {}
+                            if (panelMode != PANEL_NONE) {
+                                try { setPanelMode(ctx, ims, panelMode) } catch (_: Throwable) {}
                             }
 
                             // Auto Expand handoff: if AE's Gboard tweak is still enabled,
@@ -2135,17 +2165,33 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
             add(btn)
         }
 
-        // Button 🎮 — Game mode (TEST): hold-to-move WASD panel for Parsec.
-        // Always visible in this build; normal typing is unaffected until toggled.
+        // Button 🎮 — Gamepad panel (v2): Xbox 360 pad via the root gamepadd
+        // daemon (real uinput device that Parsec sees as hardware).
         run {
             val btn = makeBtn("\uD83C\uDFAE")
-            fun paint() { (btn as? TextView)?.alpha = if (gameModeOn) 1f else 0.45f }
+            padToggleView = btn
+            fun paint() { (btn as? TextView)?.alpha = if (panelMode == PANEL_PAD) 1f else 0.45f }
             paint()
             btn.setOnClickListener {
                 btn.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                 try {
-                    setGameMode(ctx, ims, !gameModeOn)
-                    paint()
+                    setPanelMode(ctx, ims, if (panelMode == PANEL_PAD) PANEL_NONE else PANEL_PAD)
+                } catch (_: Throwable) {}
+            }
+            add(btn)
+        }
+
+        // Button Win — Windows-keys panel (v2): compact full keyboard with
+        // latched Ctrl/Win/Alt/Shift, for driving the PC through Parsec.
+        run {
+            val btn = makeBtn("Win")
+            winToggleView = btn
+            fun paint() { (btn as? TextView)?.alpha = if (panelMode == PANEL_WIN) 1f else 0.45f }
+            paint()
+            btn.setOnClickListener {
+                btn.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                try {
+                    setPanelMode(ctx, ims, if (panelMode == PANEL_WIN) PANEL_NONE else PANEL_WIN)
                 } catch (_: Throwable) {}
             }
             add(btn)
@@ -2155,11 +2201,11 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
     }
 
     // ─────────────────────────────────────────────────────
-    // Game mode — genuine key hold for Parsec
+    // Panels — gamepad (🎮) + Windows keys (Win)
     // ─────────────────────────────────────────────────────
 
     /** Finger down → real ACTION_DOWN. No ACTION_UP until the finger lifts. */
-    private fun gameKeyDown(ims: InputMethodService, keyCode: Int) {
+    private fun gameKeyDown(ims: InputMethodService, keyCode: Int, metaState: Int = 0) {
         try {
             val now = SystemClock.uptimeMillis()
             synchronized(heldKeys) {
@@ -2167,20 +2213,20 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
                 heldKeys[keyCode] = now
             }
             val ic = caretIc(ims) ?: return
-            ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0))
-            XposedBridge.log("$TAG [GAME] DOWN keyCode=$keyCode")
+            ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0, metaState))
+            XposedBridge.log("$TAG [GAME] DOWN keyCode=$keyCode meta=$metaState")
         } catch (t: Throwable) {
             XposedBridge.log("$TAG [GAME] down failed: $t")
         }
     }
 
     /** Finger up → real ACTION_UP with the original downTime, so the host sees one held press. */
-    private fun gameKeyUp(ims: InputMethodService, keyCode: Int) {
+    private fun gameKeyUp(ims: InputMethodService, keyCode: Int, metaState: Int = 0) {
         try {
             val downTime = synchronized(heldKeys) { heldKeys.remove(keyCode) } ?: return
             val ic = caretIc(ims) ?: return
             val now = SystemClock.uptimeMillis()
-            ic.sendKeyEvent(KeyEvent(downTime, now, KeyEvent.ACTION_UP, keyCode, 0))
+            ic.sendKeyEvent(KeyEvent(downTime, now, KeyEvent.ACTION_UP, keyCode, 0, metaState))
             XposedBridge.log("$TAG [GAME] UP keyCode=$keyCode heldMs=${now - downTime}")
         } catch (t: Throwable) {
             XposedBridge.log("$TAG [GAME] up failed: $t")
@@ -2195,113 +2241,562 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
         keys.forEach { gameKeyUp(ims, it) }
     }
 
-    /** One hold-button: DOWN on touch-down, UP on touch-up/cancel. Multitouch-safe —
-     *  every button is its own View, so two fingers on two buttons track independently. */
-    private fun holdButton(
-        ctx: Context, ims: InputMethodService,
-        label: String, keyCode: Int, weight: Float
+    private fun refreshPanelToggleAlphas() {
+        (padToggleView as? TextView)?.alpha = if (panelMode == PANEL_PAD) 1f else 0.45f
+        (winToggleView as? TextView)?.alpha = if (panelMode == PANEL_WIN) 1f else 0.45f
+    }
+
+    /** One hold-button for either panel: DOWN on touch-down, UP on touch-up/cancel.
+     *  Every button is its own View, so two fingers on two buttons track
+     *  independently (multitouch). */
+    private fun panelHoldButton(
+        ctx: Context, label: String, textSp: Float, oval: Boolean,
+        onDown: () -> Unit, onUp: () -> Unit
     ): TextView {
         val dp = ctx.resources.displayMetrics.density
+        val accent = Color.parseColor("#7C8AFF")
         val normalStroke = (2f * dp).toInt()
         val pressedStroke = (4f * dp).toInt()
-        val accent = Color.parseColor("#7C8AFF")
         return TextView(ctx).apply {
             text = label
             gravity = Gravity.CENTER
-            textSize = 22f
+            textSize = textSp
             setTypeface(typeface, android.graphics.Typeface.BOLD)
             setTextColor(Color.WHITE)
-            background = roundRect(Color.parseColor("#23232E"), 14f * dp, accent, normalStroke)
+            background = GradientDrawable().apply {
+                shape = if (oval) GradientDrawable.OVAL else GradientDrawable.RECTANGLE
+                if (!oval) cornerRadius = 10f * dp
+                setColor(Color.parseColor("#23232E"))
+                setStroke(normalStroke, accent)
+            }
             isClickable = true
             isFocusable = false
-            val pad = (4f * dp).toInt()
+            val pad = (2f * dp).toInt()
             setPadding(pad, pad, pad, pad)
             setOnTouchListener { v, ev ->
                 when (ev.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                         (v.background as? GradientDrawable)?.setStroke(pressedStroke, accent)
-                        gameKeyDown(ims, keyCode)
+                        onDown()
                         true
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                         (v.background as? GradientDrawable)?.setStroke(normalStroke, accent)
-                        gameKeyUp(ims, keyCode)
+                        onUp()
                         true
                     }
                     else -> false
                 }
             }
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, weight)
         }
     }
 
-    /** The WASD pad. Built once per input view, shown/hidden by [setGameMode]. */
-    private fun buildGamePanel(ctx: Context, ims: InputMethodService): LinearLayout {
+    // ─────────────────────────────────────────────────────
+    // Gamepad link (PANEL_PAD → gamepadd daemon → uinput)
+    // ─────────────────────────────────────────────────────
+
+    private fun padEnsureClient() {
+        val c = padClient
+        if (c != null && c.connected) return
+        val now = SystemClock.uptimeMillis()
+        if (now - padLastConnectTryMs < 1000L) return
+        padLastConnectTryMs = now
+        val client = GamepadClient()
+        client.onConnectionChanged = { up ->
+            if (up) {
+                // Push the current snapshot so the daemon starts in sync.
+                synchronized(padLock) { client.send(padState) }
+            }
+            mainHandler.post { padRefreshStatus() }
+        }
+        padClient = client
+        client.connectAsync()
+        mainHandler.postDelayed({ padRefreshStatus() }, 700)
+    }
+
+    private fun padRefreshStatus() {
+        val tv = padStatusView ?: return
+        val up = padClient?.connected == true
+        tv.text = if (up) "Геймпад: подключено\n(Xbox 360 pad)"
+        else "Геймпад: демон не запущен —\nзапусти его в приложении Gboard+"
+        tv.setTextColor(Color.parseColor(if (up) "#7BE495" else "#FF9E7B"))
+    }
+
+    /** Send the current pad snapshot. Caller must hold padLock. */
+    private fun padSendLocked() {
+        val c = padClient
+        if (c == null || !c.connected) {
+            padEnsureClient()
+            return
+        }
+        c.send(padState)
+    }
+
+    private fun padSetButton(bit: Int, down: Boolean) {
+        synchronized(padLock) {
+            padState.buttons = if (down) padState.buttons or (1 shl bit)
+            else padState.buttons and (1 shl bit).inv()
+            padSendLocked()
+        }
+    }
+
+    private fun padSetStick(left: Boolean, x: Float, y: Float) {
+        synchronized(padLock) {
+            val xi = (x * 32767f).toInt()
+            val yi = (y * 32767f).toInt()
+            if (left) {
+                padState.lx = xi; padState.ly = yi
+            } else {
+                padState.rx = xi; padState.ry = yi
+            }
+            padSendLocked()
+        }
+    }
+
+    private fun padSetTrigger(left: Boolean, value: Int) {
+        synchronized(padLock) {
+            if (left) padState.lt = value else padState.rt = value
+            padSendLocked()
+        }
+    }
+
+    /** D-pad directions: 0=U, 1=D, 2=L, 3=R. Opposing directions cancel out. */
+    private fun padSetDpad(dir: Int, down: Boolean) {
+        synchronized(padLock) {
+            dpadHeld[dir] = down
+            padState.hatX = (if (dpadHeld[3]) 1 else 0) - (if (dpadHeld[2]) 1 else 0)
+            padState.hatY = (if (dpadHeld[1]) 1 else 0) - (if (dpadHeld[0]) 1 else 0)
+            padSendLocked()
+        }
+    }
+
+    /** Zero everything (mode off / keyboard hidden) so nothing stays held. */
+    private fun padResetAll() {
+        synchronized(padLock) {
+            padState.reset()
+            dpadHeld.fill(false)
+            padClient?.send(padState)
+        }
+    }
+
+    /** Analog stick: knob follows the finger inside a ring, with a small
+     *  deadzone and magnitude rescaling. Reports normalized (x, y) in -1..1,
+     *  up = negative Y — the usual gamepad convention. */
+    private inner class StickView(ctx: Context) : View(ctx) {
+        var onMove: ((Float, Float) -> Unit)? = null
+        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        private var knobX = 0f
+        private var knobY = 0f
+        private var pointerId = -1
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val dp = resources.displayMetrics.density
+            val cx = width / 2f
+            val cy = height / 2f
+            val baseR = minOf(width, height) / 2f - 3f * dp
+            val knobR = baseR * 0.42f
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 2f * dp
+            paint.color = Color.parseColor("#7C8AFF")
+            canvas.drawCircle(cx, cy, baseR, paint)
+            paint.style = Paint.Style.FILL
+            paint.color = Color.parseColor(if (pointerId >= 0) "#3A4066" else "#23232E")
+            canvas.drawCircle(cx + knobX * (baseR - knobR), cy + knobY * (baseR - knobR), knobR, paint)
+        }
+
+        private fun releaseStick() {
+            pointerId = -1
+            knobX = 0f
+            knobY = 0f
+            onMove?.invoke(0f, 0f)
+            invalidate()
+        }
+
+        override fun onTouchEvent(ev: MotionEvent): Boolean {
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                    if (pointerId == -1) {
+                        val idx = ev.actionIndex
+                        pointerId = ev.getPointerId(idx)
+                        performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        updateKnob(ev.getX(idx), ev.getY(idx))
+                    }
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val idx = ev.findPointerIndex(pointerId)
+                    if (idx >= 0) updateKnob(ev.getX(idx), ev.getY(idx))
+                }
+                MotionEvent.ACTION_POINTER_UP -> {
+                    if (ev.getPointerId(ev.actionIndex) == pointerId) releaseStick()
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> releaseStick()
+            }
+            return true
+        }
+
+        private fun updateKnob(px: Float, py: Float) {
+            val dp = resources.displayMetrics.density
+            val maxR = minOf(width, height) / 2f - 3f * dp
+            var dx = (px - width / 2f) / maxR
+            var dy = (py - height / 2f) / maxR
+            val mag = kotlin.math.sqrt(dx * dx + dy * dy)
+            if (mag > 1f) {
+                dx /= mag; dy /= mag
+            }
+            val dead = 0.12f
+            if (mag < dead) {
+                dx = 0f; dy = 0f
+            } else {
+                val cur = kotlin.math.sqrt(dx * dx + dy * dy)
+                val scaled = ((mag - dead) / (1f - dead)).coerceAtMost(1f)
+                if (cur > 0f) {
+                    dx = dx / cur * scaled; dy = dy / cur * scaled
+                }
+            }
+            knobX = dx; knobY = dy
+            onMove?.invoke(dx, dy)
+            invalidate()
+        }
+    }
+
+    /** The Xbox gamepad panel (v2 — replaces the WASD pad). Two zones:
+     *  left = LB/LT + left stick + D-pad + L3; right = RB/RT + ABXY +
+     *  right stick + R3; a narrow center column holds Back/Start + status. */
+    private fun buildPadPanel(ctx: Context): LinearLayout {
         val dp = ctx.resources.displayMetrics.density
+        fun colLp(weight: Float) = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, weight)
+        fun rowLp(heightDp: Float) = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, (heightDp * dp).toInt())
+        fun btnLp(weight: Float, heightDp: Float) =
+            LinearLayout.LayoutParams(0, (heightDp * dp).toInt(), weight).apply {
+                val m = (3f * dp).toInt(); setMargins(m, m, m, m)
+            }
+
         val panel = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
+            orientation = LinearLayout.HORIZONTAL
             tag = GAME_PANEL_TAG
             visibility = View.GONE
             setBackgroundColor(Color.parseColor("#0F0F14"))
-            val pad = (8f * dp).toInt()
+            val pad = (6f * dp).toInt()
             setPadding(pad, pad, pad, pad)
         }
-        fun addRow(views: List<View>) {
-            val r = LinearLayout(ctx).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER
-            }
-            views.forEach { r.addView(it) }
-            val m = (4f * dp).toInt()
-            panel.addView(r, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f).apply {
-                setMargins(m, m, m, m)
-            })
+
+        // ── Left zone ──
+        val left = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        val shouldersL = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        shouldersL.addView(
+            panelHoldButton(ctx, "LB", 13f, false,
+                { padSetButton(GamepadProto.BTN_LB, true) }, { padSetButton(GamepadProto.BTN_LB, false) }),
+            btnLp(1f, 30f))
+        shouldersL.addView(
+            panelHoldButton(ctx, "LT", 13f, false,
+                { padSetTrigger(true, 255) }, { padSetTrigger(true, 0) }),
+            btnLp(1f, 30f))
+        left.addView(shouldersL, rowLp(36f))
+
+        val stickL = StickView(ctx)
+        stickL.onMove = { x, y -> padSetStick(true, x, y) }
+        left.addView(stickL, rowLp(92f))
+
+        val dpad = FrameLayout(ctx)
+        val dSize = (30f * dp).toInt()
+        fun dBtn(label: String, dir: Int, gravity: Int): TextView {
+            val b = panelHoldButton(ctx, label, 13f, false,
+                { padSetDpad(dir, true) }, { padSetDpad(dir, false) })
+            b.layoutParams = FrameLayout.LayoutParams(dSize, dSize, gravity)
+            return b
         }
-        addRow(listOf(
-            holdButton(ctx, ims, "A", KeyEvent.KEYCODE_A, 1f),
-            holdButton(ctx, ims, "W", KeyEvent.KEYCODE_W, 1f),
-            holdButton(ctx, ims, "D", KeyEvent.KEYCODE_D, 1f),
-            holdButton(ctx, ims, "SPACE", KeyEvent.KEYCODE_SPACE, 1.8f)
-        ))
-        addRow(listOf(
-            holdButton(ctx, ims, "S", KeyEvent.KEYCODE_S, 1f),
-            holdButton(ctx, ims, "SHIFT", KeyEvent.KEYCODE_SHIFT_LEFT, 1.5f),
-            holdButton(ctx, ims, "E", KeyEvent.KEYCODE_E, 1f),
-            holdButton(ctx, ims, "ESC", KeyEvent.KEYCODE_ESCAPE, 1.3f)
-        ))
+        dpad.addView(dBtn("▲", 0, Gravity.TOP or Gravity.CENTER_HORIZONTAL))
+        dpad.addView(dBtn("▼", 1, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
+        dpad.addView(dBtn("◀", 2, Gravity.LEFT or Gravity.CENTER_VERTICAL))
+        dpad.addView(dBtn("▶", 3, Gravity.RIGHT or Gravity.CENTER_VERTICAL))
+        left.addView(dpad, rowLp(88f))
+
+        val l3Row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        l3Row.addView(
+            panelHoldButton(ctx, "L3", 11f, false,
+                { padSetButton(GamepadProto.BTN_L3, true) }, { padSetButton(GamepadProto.BTN_L3, false) }),
+            btnLp(1f, 24f))
+        left.addView(l3Row, rowLp(30f))
+        panel.addView(left, colLp(1.15f))
+
+        // ── Center column: status + Back/Start ──
+        val center = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        val status = TextView(ctx).apply {
+            gravity = Gravity.CENTER
+            textSize = 9.5f
+            setTextColor(Color.parseColor("#FF9E7B"))
+        }
+        padStatusView = status
+        center.addView(status, rowLp(52f))
+        fun cBtnLp() = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, (30f * dp).toInt()).apply {
+            val m = (3f * dp).toInt(); setMargins(m, m, m, m)
+        }
+        center.addView(
+            panelHoldButton(ctx, "BACK", 11f, false,
+                { padSetButton(GamepadProto.BTN_BACK, true) }, { padSetButton(GamepadProto.BTN_BACK, false) }),
+            cBtnLp())
+        center.addView(
+            panelHoldButton(ctx, "START", 11f, false,
+                { padSetButton(GamepadProto.BTN_START, true) }, { padSetButton(GamepadProto.BTN_START, false) }),
+            cBtnLp())
+        panel.addView(center, colLp(0.62f))
+
+        // ── Right zone ──
+        val right = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        val shouldersR = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        shouldersR.addView(
+            panelHoldButton(ctx, "RB", 13f, false,
+                { padSetButton(GamepadProto.BTN_RB, true) }, { padSetButton(GamepadProto.BTN_RB, false) }),
+            btnLp(1f, 30f))
+        shouldersR.addView(
+            panelHoldButton(ctx, "RT", 13f, false,
+                { padSetTrigger(false, 255) }, { padSetTrigger(false, 0) }),
+            btnLp(1f, 30f))
+        right.addView(shouldersR, rowLp(36f))
+
+        val abxy = FrameLayout(ctx)
+        val aSize = (40f * dp).toInt()
+        fun aBtn(label: String, bit: Int, gravity: Int): TextView {
+            val b = panelHoldButton(ctx, label, 15f, true,
+                { padSetButton(bit, true) }, { padSetButton(bit, false) })
+            b.layoutParams = FrameLayout.LayoutParams(aSize, aSize, gravity)
+            return b
+        }
+        abxy.addView(aBtn("Y", GamepadProto.BTN_Y, Gravity.TOP or Gravity.CENTER_HORIZONTAL))
+        abxy.addView(aBtn("X", GamepadProto.BTN_X, Gravity.LEFT or Gravity.CENTER_VERTICAL))
+        abxy.addView(aBtn("B", GamepadProto.BTN_B, Gravity.RIGHT or Gravity.CENTER_VERTICAL))
+        abxy.addView(aBtn("A", GamepadProto.BTN_A, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
+        right.addView(abxy, rowLp(92f))
+
+        val stickR = StickView(ctx)
+        stickR.onMove = { x, y -> padSetStick(false, x, y) }
+        right.addView(stickR, rowLp(88f))
+
+        val r3Row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        r3Row.addView(
+            panelHoldButton(ctx, "R3", 11f, false,
+                { padSetButton(GamepadProto.BTN_R3, true) }, { padSetButton(GamepadProto.BTN_R3, false) }),
+            btnLp(1f, 24f))
+        right.addView(r3Row, rowLp(30f))
+        panel.addView(right, colLp(1.15f))
+
+        padRefreshStatus()
+        return panel
+    }
+
+    // ─────────────────────────────────────────────────────
+    // Windows keyboard (PANEL_WIN)
+    // ─────────────────────────────────────────────────────
+
+    /** Combined meta state for the currently latched modifiers. */
+    private fun winMetaNow(): Int {
+        var m = 0
+        if (winLatch.contains(KeyEvent.KEYCODE_CTRL_LEFT))
+            m = m or KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON
+        if (winLatch.contains(KeyEvent.KEYCODE_ALT_LEFT))
+            m = m or KeyEvent.META_ALT_ON or KeyEvent.META_ALT_LEFT_ON
+        if (winLatch.contains(KeyEvent.KEYCODE_SHIFT_LEFT))
+            m = m or KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON
+        if (winLatch.contains(KeyEvent.KEYCODE_META_LEFT))
+            m = m or KeyEvent.META_META_ON or KeyEvent.META_META_LEFT_ON
+        return m
+    }
+
+    /** Key press with latched modifiers wrapped around it: modifiers go DOWN
+     *  first, the key follows with the full meta state, then all come UP —
+     *  so the host PC sees a genuine Ctrl/Win/Alt+Shift+key chord, and holding
+     *  the key itself still holds it. */
+    private fun winKeyDown(ims: InputMethodService, keyCode: Int) {
+        val meta = winMetaNow()
+        for (m in WIN_MOD_ORDER) if (winLatch.contains(m)) gameKeyDown(ims, m, meta)
+        gameKeyDown(ims, keyCode, meta)
+    }
+
+    private fun winKeyUp(ims: InputMethodService, keyCode: Int) {
+        val meta = winMetaNow()
+        gameKeyUp(ims, keyCode, meta)
+        for (m in WIN_MOD_ORDER.reversed()) if (winLatch.contains(m)) gameKeyUp(ims, m, meta)
+    }
+
+    /** Compact full Windows keyboard: Esc + F1–F12, number row, full QWERTY,
+     *  arrows, and latch modifiers (Ctrl/Win/Alt/Shift stay on until tapped
+     *  again). Keys are deliberately smaller than the v1 game buttons. */
+    private fun buildWinPanel(ctx: Context, ims: InputMethodService): LinearLayout {
+        val dp = ctx.resources.displayMetrics.density
+        val accent = Color.parseColor("#7C8AFF")
+        val panel = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            tag = WIN_PANEL_TAG
+            visibility = View.GONE
+            setBackgroundColor(Color.parseColor("#0F0F14"))
+            val pad = (5f * dp).toInt()
+            setPadding(pad, pad, pad, pad)
+        }
+        val painters = mutableListOf<() -> Unit>()
+
+        fun keyLp(weight: Float) = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, weight).apply {
+            val m = (2f * dp).toInt(); setMargins(m, m, m, m)
+        }
+        fun key(label: String, code: Int, w: Float = 1f, sp: Float = 12f): TextView {
+            val b = panelHoldButton(ctx, label, sp, false,
+                { winKeyDown(ims, code) }, { winKeyUp(ims, code) })
+            b.layoutParams = keyLp(w)
+            return b
+        }
+        fun latch(label: String, code: Int, w: Float): TextView {
+            val b = TextView(ctx).apply {
+                text = label
+                gravity = Gravity.CENTER
+                textSize = 11f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setTextColor(Color.WHITE)
+                background = GradientDrawable().apply {
+                    cornerRadius = 10f * dp
+                    setColor(Color.parseColor("#23232E"))
+                    setStroke((2f * dp).toInt(), accent)
+                }
+                isClickable = true
+                isFocusable = false
+            }
+            fun paint() {
+                (b.background as? GradientDrawable)?.setColor(
+                    Color.parseColor(if (winLatch.contains(code)) "#3D4470" else "#23232E"))
+            }
+            paint()
+            painters.add { paint() }
+            b.setOnClickListener {
+                b.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                if (winLatch.contains(code)) winLatch.remove(code) else winLatch.add(code)
+                paint()
+            }
+            b.layoutParams = keyLp(w)
+            return b
+        }
+        fun row(heightDp: Float, vararg keys: View) {
+            val r = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+            keys.forEach { r.addView(it) }
+            panel.addView(r, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, (heightDp * dp).toInt()))
+        }
+
+        // F-row
+        row(28f,
+            key("esc", KeyEvent.KEYCODE_ESCAPE, 1.2f, 9f),
+            key("F1", KeyEvent.KEYCODE_F1, 1f, 9f), key("F2", KeyEvent.KEYCODE_F2, 1f, 9f),
+            key("F3", KeyEvent.KEYCODE_F3, 1f, 9f), key("F4", KeyEvent.KEYCODE_F4, 1f, 9f),
+            key("F5", KeyEvent.KEYCODE_F5, 1f, 9f), key("F6", KeyEvent.KEYCODE_F6, 1f, 9f),
+            key("F7", KeyEvent.KEYCODE_F7, 1f, 9f), key("F8", KeyEvent.KEYCODE_F8, 1f, 9f),
+            key("F9", KeyEvent.KEYCODE_F9, 1f, 9f), key("F10", KeyEvent.KEYCODE_F10, 1f, 9f),
+            key("F11", KeyEvent.KEYCODE_F11, 1f, 9f), key("F12", KeyEvent.KEYCODE_F12, 1f, 9f))
+        // Number row
+        row(33f,
+            key("`", KeyEvent.KEYCODE_GRAVE), key("1", KeyEvent.KEYCODE_1),
+            key("2", KeyEvent.KEYCODE_2), key("3", KeyEvent.KEYCODE_3),
+            key("4", KeyEvent.KEYCODE_4), key("5", KeyEvent.KEYCODE_5),
+            key("6", KeyEvent.KEYCODE_6), key("7", KeyEvent.KEYCODE_7),
+            key("8", KeyEvent.KEYCODE_8), key("9", KeyEvent.KEYCODE_9),
+            key("0", KeyEvent.KEYCODE_0), key("-", KeyEvent.KEYCODE_MINUS),
+            key("=", KeyEvent.KEYCODE_EQUALS), key("⌫", KeyEvent.KEYCODE_DEL, 1.6f))
+        // QWERTY row
+        row(33f,
+            key("Tab", KeyEvent.KEYCODE_TAB, 1.4f, 10f),
+            key("Q", KeyEvent.KEYCODE_Q), key("W", KeyEvent.KEYCODE_W),
+            key("E", KeyEvent.KEYCODE_E), key("R", KeyEvent.KEYCODE_R),
+            key("T", KeyEvent.KEYCODE_T), key("Y", KeyEvent.KEYCODE_Y),
+            key("U", KeyEvent.KEYCODE_U), key("I", KeyEvent.KEYCODE_I),
+            key("O", KeyEvent.KEYCODE_O), key("P", KeyEvent.KEYCODE_P),
+            key("[", KeyEvent.KEYCODE_LEFT_BRACKET), key("]", KeyEvent.KEYCODE_RIGHT_BRACKET),
+            key("\\", KeyEvent.KEYCODE_BACKSLASH, 1.4f))
+        // Home row
+        row(33f,
+            key("A", KeyEvent.KEYCODE_A), key("S", KeyEvent.KEYCODE_S),
+            key("D", KeyEvent.KEYCODE_D), key("F", KeyEvent.KEYCODE_F),
+            key("G", KeyEvent.KEYCODE_G), key("H", KeyEvent.KEYCODE_H),
+            key("J", KeyEvent.KEYCODE_J), key("K", KeyEvent.KEYCODE_K),
+            key("L", KeyEvent.KEYCODE_L), key(";", KeyEvent.KEYCODE_SEMICOLON),
+            key("'", KeyEvent.KEYCODE_APOSTROPHE),
+            key("Enter", KeyEvent.KEYCODE_ENTER, 1.8f, 10f))
+        // Bottom letter row
+        row(33f,
+            latch("Shift", KeyEvent.KEYCODE_SHIFT_LEFT, 1.6f),
+            key("Z", KeyEvent.KEYCODE_Z), key("X", KeyEvent.KEYCODE_X),
+            key("C", KeyEvent.KEYCODE_C), key("V", KeyEvent.KEYCODE_V),
+            key("B", KeyEvent.KEYCODE_B), key("N", KeyEvent.KEYCODE_N),
+            key("M", KeyEvent.KEYCODE_M), key(",", KeyEvent.KEYCODE_COMMA),
+            key(".", KeyEvent.KEYCODE_PERIOD), key("/", KeyEvent.KEYCODE_SLASH),
+            key("Del", KeyEvent.KEYCODE_FORWARD_DEL, 1.3f, 10f))
+        // Modifier / space / arrows row
+        row(33f,
+            latch("Ctrl", KeyEvent.KEYCODE_CTRL_LEFT, 1.3f),
+            latch("Win", KeyEvent.KEYCODE_META_LEFT, 1.3f),
+            latch("Alt", KeyEvent.KEYCODE_ALT_LEFT, 1.3f),
+            key("Space", KeyEvent.KEYCODE_SPACE, 4.2f, 11f),
+            key("◀", KeyEvent.KEYCODE_DPAD_LEFT), key("▲", KeyEvent.KEYCODE_DPAD_UP),
+            key("▼", KeyEvent.KEYCODE_DPAD_DOWN), key("▶", KeyEvent.KEYCODE_DPAD_RIGHT))
+
+        winLatchPainters = painters
         return panel
     }
 
     /**
-     * Toggle game mode. ON = hide Gboard's key grid, show the hold-panel.
-     * OFF = restore keys, release anything still held.
+     * Switch the active panel. PAD/WIN = hide Gboard's key grid and show that
+     * panel instead. NONE = restore the grid, release anything held, zero the
+     * gamepad and drop the modifier latch.
      */
-    private fun setGameMode(ctx: Context, ims: InputMethodService, on: Boolean) {
-        gameModeOn = on
-        val content = gameContentRef ?: return
+    private fun setPanelMode(ctx: Context, ims: InputMethodService, mode: Int) {
+        panelMode = mode
+        val content = gameContentRef
+        if (content == null) {
+            refreshPanelToggleAlphas()
+            return
+        }
         try {
-            // The key grid is "the child that is neither our toolbar nor our panel".
+            // The key grid is "the child that is neither our toolbar nor our panels".
             for (i in 0 until content.childCount) {
                 val child = content.getChildAt(i) ?: continue
                 val tag = child.tag?.toString() ?: ""
-                if (tag == "gbp_kb_toolbar" || tag == GAME_PANEL_TAG) continue
-                child.visibility = if (on) View.GONE else View.VISIBLE
+                if (tag == "gbp_kb_toolbar" || tag == GAME_PANEL_TAG || tag == WIN_PANEL_TAG) continue
+                child.visibility = if (mode == PANEL_NONE) View.VISIBLE else View.GONE
             }
-            var panel = content.findViewWithTag<View>(GAME_PANEL_TAG)
-            if (panel == null && on) {
-                panel = buildGamePanel(ctx, ims)
-                val dp = ctx.resources.displayMetrics.density
-                content.addView(panel, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, (190f * dp).toInt()))
+            val dp = ctx.resources.displayMetrics.density
+            var pad = content.findViewWithTag<View>(GAME_PANEL_TAG)
+            if (pad == null && mode == PANEL_PAD) {
+                pad = buildPadPanel(ctx)
+                content.addView(pad, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, (PAD_PANEL_HEIGHT_DP * dp).toInt()))
             }
-            panel?.visibility = if (on) View.VISIBLE else View.GONE
-            if (!on) gameReleaseAll(ims)
-            XposedBridge.log("$TAG [GAME] mode=$on")
+            pad?.visibility = if (mode == PANEL_PAD) View.VISIBLE else View.GONE
+            var win = content.findViewWithTag<View>(WIN_PANEL_TAG)
+            if (win == null && mode == PANEL_WIN) {
+                win = buildWinPanel(ctx, ims)
+                content.addView(win, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, (WIN_PANEL_HEIGHT_DP * dp).toInt()))
+            }
+            win?.visibility = if (mode == PANEL_WIN) View.VISIBLE else View.GONE
+            if (mode == PANEL_PAD) {
+                padEnsureClient()
+                padRefreshStatus()
+            }
+            if (mode == PANEL_NONE) {
+                gameReleaseAll(ims)
+                padResetAll()
+                if (winLatch.isNotEmpty()) {
+                    winLatch.clear()
+                    winLatchPainters.forEach { try { it() } catch (_: Throwable) {} }
+                }
+            }
+            XposedBridge.log("$TAG [GAME] panelMode=$mode")
         } catch (t: Throwable) {
-            XposedBridge.log("$TAG [GAME] setMode failed: $t")
+            XposedBridge.log("$TAG [GAME] setPanelMode failed: $t")
         }
+        refreshPanelToggleAlphas()
     }
 
     // ─────────────────────────────────────────────────────

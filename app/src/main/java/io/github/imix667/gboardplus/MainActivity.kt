@@ -232,6 +232,9 @@ private fun SettingsScreen() {
         item { SectionTitle("Haptics") }
         item { IntSlider(R.drawable.ic_vibration, "Vibration strength", st.i("vibration_strength", 100), 0..100, 19) { st.setStr("vibration_strength", it.toString()) } }
 
+        item { SectionTitle("Gamepad (Parsec)") }
+        item { GamepadDaemonCard() }
+
         item { SectionTitle("Undo") }
         item { Toggle(R.drawable.ic_undo, "Undo", "Restore deleted text", st.bool("undo_enabled", true)) { st.setBool("undo_enabled", it) } }
         if (st.bool("undo_enabled", true)) {
@@ -252,6 +255,57 @@ private fun SettingsScreen() {
             )
         }
     }
+    }
+}
+
+@Composable
+private fun GamepadDaemonCard() {
+    val ctx = LocalContext.current
+    var running by remember { mutableStateOf<Boolean?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var msg by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) { Thread { running = GamepadDaemon.isRunning() }.start() }
+
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Lead(R.drawable.ic_trackpad)
+                Column(Modifier.weight(1f)) {
+                    Text("Геймпад-демон (uinput)", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        when (running) {
+                            true -> "Запущен — виртуальный Xbox 360 pad активен"
+                            false -> "Не запущен"
+                            null -> "Проверяю…"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Text(
+                "Демон поднимает настоящий виртуальный «Microsoft X-Box 360 pad» через /dev/uinput — " +
+                    "Parsec видит его как железный контроллер. Запусти демон, затем открой клавиатуру и нажми 🎮. Нужен root.",
+                style = MaterialTheme.typography.bodySmall
+            )
+            if (msg != null) {
+                Text(msg!!, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CompactButton(if (busy) "Запускаю…" else "Запустить геймпад-демон", !busy) {
+                    busy = true
+                    Thread {
+                        val (ok, detail) = GamepadDaemon.start(ctx)
+                        running = ok
+                        msg = detail
+                        busy = false
+                    }.start()
+                }
+                CompactText("Проверить") { Thread { running = GamepadDaemon.isRunning() }.start() }
+            }
+        }
     }
 }
 
