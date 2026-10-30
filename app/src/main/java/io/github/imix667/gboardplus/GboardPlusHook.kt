@@ -345,6 +345,13 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
     private val WIN_PANEL_TAG = "gbp_win_panel"
     private val PAD_PANEL_HEIGHT_DP = 258f
     private val WIN_PANEL_HEIGHT_DP = 272f
+    // Win panel width cap: on wide screens (landscape phones/tablets) the
+    // full-width 100% keyboard stretches keys into huge ovals. Cap the panel
+    // at 620dp, centered, when the screen is wider than 640dp; below that
+    // (portrait) keep MATCH_PARENT exactly as before. Gamepad panel is
+    // deliberately NOT capped — its split edge layout is by design.
+    private val WIN_PANEL_MAX_WIDTH_DP = 620f
+    private val WIN_PANEL_WIDE_THRESHOLD_DP = 640f
     private val heldKeys = mutableMapOf<Int, Long>()          // keyCode -> downTime (synchronized)
     // Toolbar toggle views (latest built toolbar) for alpha refresh on mode change.
     @Volatile private var padToggleView: View? = null
@@ -777,6 +784,16 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
                         // inputType == 0 → input restarted on something that holds no text.
                         if ((param.args[0] as? EditorInfo)?.inputType == 0) inputRestartedNonEditable = true
                         try { refreshPrefs(ims.applicationContext); registerShake(ims.applicationContext) } catch (_: Throwable) {}
+                        // Win-panel width depends on the current screen width, so
+                        // re-apply it on every show: a rotation while the panel is
+                        // open (or between shows) must re-cap / un-cap it, not keep
+                        // the width computed when the panel was first built.
+                        // setPanelMode() recalculates the width on each call.
+                        try {
+                            if (panelMode == PANEL_WIN && gameContentRef != null) {
+                                setPanelMode(ims.applicationContext, ims, PANEL_WIN)
+                            }
+                        } catch (_: Throwable) {}
                         // Screenshot capture must not depend on the toolbar being injected:
                         // the toolbar needs a real editor, and Gboard is also brought up over
                         // targets that hold no text at all. Opening the vault here costs one
@@ -2910,6 +2927,41 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
     }
 
     /**
+     * LayoutParams for the Win panel inside its (vertical LinearLayout)
+     * container, computed from the CURRENT screen width on every call:
+     * screen > 640dp wide → fixed 620dp width, centered horizontally, so
+     * the background/panel only spans that centered strip and the keys keep
+     * portrait-like proportions; otherwise MATCH_PARENT (portrait, unchanged).
+     */
+    private fun winPanelLayoutParams(ctx: Context): LinearLayout.LayoutParams {
+        val dm = ctx.resources.displayMetrics
+        val density = dm.density
+        val screenWidthDp = if (density > 0f) dm.widthPixels / density else 0f
+        val heightPx = (WIN_PANEL_HEIGHT_DP * density).toInt()
+        return if (screenWidthDp > WIN_PANEL_WIDE_THRESHOLD_DP) {
+            LinearLayout.LayoutParams((WIN_PANEL_MAX_WIDTH_DP * density).toInt(), heightPx).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+            }
+        } else {
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, heightPx)
+        }
+    }
+
+    /** Re-apply [winPanelLayoutParams] to an already-attached Win panel. */
+    private fun applyWinPanelWidth(ctx: Context, win: View) {
+        val fresh = winPanelLayoutParams(ctx)
+        val cur = win.layoutParams as? LinearLayout.LayoutParams
+        if (cur == null) {
+            win.layoutParams = fresh
+        } else if (cur.width != fresh.width || cur.height != fresh.height || cur.gravity != fresh.gravity) {
+            cur.width = fresh.width
+            cur.height = fresh.height
+            cur.gravity = fresh.gravity
+            win.layoutParams = cur
+        }
+    }
+
+    /**
      * Switch the active panel. PAD/WIN = hide Gboard's key grid and show that
      * panel instead. NONE = restore the grid, release anything held, zero the
      * gamepad and drop the modifier latch.
@@ -2940,8 +2992,11 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
             var win = content.findViewWithTag<View>(WIN_PANEL_TAG)
             if (win == null && mode == PANEL_WIN) {
                 win = buildWinPanel(ctx, ims)
-                content.addView(win, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, (WIN_PANEL_HEIGHT_DP * dp).toInt()))
+                content.addView(win, winPanelLayoutParams(ctx))
+            } else if (win != null) {
+                // Panel already exists (e.g. rotation / re-show): width must be
+                // recalculated at every show, not only at creation time.
+                applyWinPanelWidth(ctx, win)
             }
             win?.visibility = if (mode == PANEL_WIN) View.VISIBLE else View.GONE
             if (mode == PANEL_PAD) {
