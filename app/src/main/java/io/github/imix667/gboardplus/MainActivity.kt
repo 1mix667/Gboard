@@ -49,6 +49,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -263,7 +264,7 @@ private fun GamepadDaemonCard() {
     val ctx = LocalContext.current
     var running by remember { mutableStateOf<Boolean?>(null) }
     var busy by remember { mutableStateOf(false) }
-    var msg by remember { mutableStateOf<String?>(null) }
+    var detail by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) { Thread { running = GamepadDaemon.isRunning() }.start() }
 
@@ -275,12 +276,16 @@ private fun GamepadDaemonCard() {
                     Text("Геймпад-демон (uinput)", style = MaterialTheme.typography.bodyMedium)
                     Text(
                         when (running) {
-                            true -> "Запущен — виртуальный Xbox 360 pad активен"
+                            true -> "Демон работает"
                             false -> "Не запущен"
                             null -> "Проверяю…"
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = when (running) {
+                            true -> Color(0xFF4CAF50)
+                            false -> Color(0xFFE53935)
+                            null -> MaterialTheme.colorScheme.onSurfaceVariant
+                        }
                     )
                 }
             }
@@ -289,21 +294,34 @@ private fun GamepadDaemonCard() {
                     "Parsec видит его как железный контроллер. Запусти демон, затем открой клавиатуру и нажми 🎮. Нужен root.",
                 style = MaterialTheme.typography.bodySmall
             )
-            if (msg != null) {
-                Text(msg!!, style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (detail != null) {
+                // Diagnostics: verdict reason + captured su output + the last
+                // lines of the daemon's own log, monospace so a screenshot of
+                // this card doubles as a bug report.
+                Text(
+                    detail!!,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = if (running == true) Color(0xFF4CAF50) else Color(0xFFE53935)
+                )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 CompactButton(if (busy) "Запускаю…" else "Запустить геймпад-демон", !busy) {
                     busy = true
                     Thread {
-                        val (ok, detail) = GamepadDaemon.start(ctx)
+                        val (ok, text) = GamepadDaemon.start(ctx)
                         running = ok
-                        msg = detail
+                        detail = text
                         busy = false
                     }.start()
                 }
-                CompactText("Проверить") { Thread { running = GamepadDaemon.isRunning() }.start() }
+                CompactText("Проверить") {
+                    Thread {
+                        val (ok, text) = GamepadDaemon.diagnose(ctx)
+                        running = ok
+                        detail = text
+                    }.start()
+                }
             }
         }
     }

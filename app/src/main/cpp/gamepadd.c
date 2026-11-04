@@ -28,7 +28,11 @@
 // When a client disconnects, the state is zeroed so nothing can stay stuck
 // "pressed" on the host PC.
 //
-// Run as root (su). Optional arg --daemonize detaches via daemon(0, 0).
+// Run as root (su). Optional args:
+//   --daemonize   detach via daemon(0, 0)
+//   --log PATH    also append every log line to PATH (for in-app diagnostics:
+//                 after --daemonize, stderr is /dev/null, so the file is the
+//                 only place the init trace survives)
 
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -36,6 +40,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <stdarg.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -48,12 +53,33 @@
 
 #ifdef __ANDROID__
 #include <android/log.h>
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "gamepadd", __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "gamepadd", __VA_ARGS__)
-#else
-#define LOGI(...) do { fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } while (0)
-#define LOGE(...) do { fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } while (0)
 #endif
+
+// Every log line goes to logcat (Android) or stderr (host) AND, when
+// --log PATH was given, to that file (append, flushed per line).
+static FILE *g_log_file = NULL;
+
+static void gbp_log(int is_err, const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+#ifdef __ANDROID__
+    __android_log_print(is_err ? ANDROID_LOG_ERROR : ANDROID_LOG_INFO,
+                        "gamepadd", "%s", buf);
+#else
+    (void)is_err;
+    fprintf(stderr, "%s\n", buf);
+    fflush(stderr);
+#endif
+    if (g_log_file) {
+        fprintf(g_log_file, "%s\n", buf);
+        fflush(g_log_file);
+    }
+}
+#define LOGI(...) gbp_log(0, __VA_ARGS__)
+#define LOGE(...) gbp_log(1, __VA_ARGS__)
 
 #define SOCK_NAME "gbp_gamepad"
 #define FRAME_SIZE 24
@@ -109,23 +135,38 @@ static int emit_event(int fd, uint16_t type, uint16_t code, int32_t value) {
 }
 
 // Create the virtual "Microsoft X-Box 360 pad". Returns uinput fd or -1.
+// Every init step is logged (with errno on failure) so a daemon that
+// "just doesn't start" leaves a diagnosable trace.
 static int create_device(void) {
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) {
-        LOGE("open /dev/uinput failed: %s", strerror(errno));
+        LOGE("pad: open /dev/uinput failed: errno=%d (%s)", errno, strerror(errno));
         return -1;
     }
+    LOGI("pad: /dev/uinput opened (fd=%d)", fd);
 
-    ioctl(fd, UI_SET_EVBIT, EV_SYN);
-    ioctl(fd, UI_SET_EVBIT, EV_KEY);
-    ioctl(fd, UI_SET_EVBIT, EV_ABS);
-
-    for (int i = 0; i < 11; i++) ioctl(fd, UI_SET_KEYBIT, kKeyForBit[i]);
-
+    int fails = 0;
+    if (ioctl(fd, UI_SET_EVBIT, EV_SYN) < 0) fails++;
+    if (ioctl(fd, UI_SET_EVBIT, EV_KEY) < 0) fails++;
+    if (ioctl(fd, UI_SET_EVBIT, EV_ABS) < 0) fails++;
+    if (fails) {
+        LOGE("pad: UI_SET_EVBIT failed x%d: errno=%d (%s)", fails, errno, strerror(errno));
+        close(fd);
+        return -1;
+    }
+    for (int i = 0; i < 11; i++)
+        if (ioctl(fd, UI_SET_KEYBIT, kKeyForBit[i]) < 0) fails++;
     static const int axes[8] = {
         ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_Z, ABS_RZ, ABS_HAT0X, ABS_HAT0Y
     };
-    for (int i = 0; i < 8; i++) ioctl(fd, UI_SET_ABSBIT, axes[i]);
+    for (int i = 0; i < 8; i++)
+        if (ioctl(fd, UI_SET_ABSBIT, axes[i]) < 0) fails++;
+    if (fails) {
+        LOGE("pad: UI_SET_KEYBIT/ABSBIT failed x%d: errno=%d (%s)", fails, errno, strerror(errno));
+        close(fd);
+        return -1;
+    }
+    LOGI("pad: capabilities set (11 buttons, 8 axes)");
 
     struct uinput_user_dev dev;
     memset(&dev, 0, sizeof(dev));
@@ -145,18 +186,19 @@ static int create_device(void) {
     dev.absmin[ABS_HAT0Y] = -1; dev.absmax[ABS_HAT0Y] = 1;
 
     if (write(fd, &dev, sizeof(dev)) != (ssize_t)sizeof(dev)) {
-        LOGE("write uinput_user_dev failed: %s", strerror(errno));
+        LOGE("pad: write uinput_user_dev failed: errno=%d (%s)", errno, strerror(errno));
         close(fd);
         return -1;
     }
+    LOGI("pad: device descriptor written (\"Microsoft X-Box 360 pad\" 045e:028e)");
     if (ioctl(fd, UI_DEV_CREATE) < 0) {
-        LOGE("UI_DEV_CREATE failed: %s", strerror(errno));
+        LOGE("pad: UI_DEV_CREATE failed: errno=%d (%s)", errno, strerror(errno));
         close(fd);
         return -1;
     }
     // Give the kernel/userspace a moment to register the input device.
     usleep(200 * 1000);
-    LOGI("virtual Xbox 360 pad created");
+    LOGI("pad: UI_DEV_CREATE ok — virtual Xbox 360 pad created");
     return fd;
 }
 
@@ -164,18 +206,26 @@ static int create_device(void) {
 static int create_mouse_device(void) {
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) {
-        LOGE("open /dev/uinput (mouse) failed: %s", strerror(errno));
+        LOGE("mouse: open /dev/uinput failed: errno=%d (%s)", errno, strerror(errno));
         return -1;
     }
+    LOGI("mouse: /dev/uinput opened (fd=%d)", fd);
 
-    ioctl(fd, UI_SET_EVBIT, EV_SYN);
-    ioctl(fd, UI_SET_EVBIT, EV_KEY);
-    ioctl(fd, UI_SET_EVBIT, EV_REL);
-
-    for (int i = 0; i < 3; i++) ioctl(fd, UI_SET_KEYBIT, kMouseKeyForBit[i]);
-    ioctl(fd, UI_SET_RELBIT, REL_X);
-    ioctl(fd, UI_SET_RELBIT, REL_Y);
-    ioctl(fd, UI_SET_RELBIT, REL_WHEEL);
+    int fails = 0;
+    if (ioctl(fd, UI_SET_EVBIT, EV_SYN) < 0) fails++;
+    if (ioctl(fd, UI_SET_EVBIT, EV_KEY) < 0) fails++;
+    if (ioctl(fd, UI_SET_EVBIT, EV_REL) < 0) fails++;
+    for (int i = 0; i < 3; i++)
+        if (ioctl(fd, UI_SET_KEYBIT, kMouseKeyForBit[i]) < 0) fails++;
+    if (ioctl(fd, UI_SET_RELBIT, REL_X) < 0) fails++;
+    if (ioctl(fd, UI_SET_RELBIT, REL_Y) < 0) fails++;
+    if (ioctl(fd, UI_SET_RELBIT, REL_WHEEL) < 0) fails++;
+    if (fails) {
+        LOGE("mouse: UI_SET_* failed x%d: errno=%d (%s)", fails, errno, strerror(errno));
+        close(fd);
+        return -1;
+    }
+    LOGI("mouse: capabilities set (3 buttons, REL_X/Y/WHEEL)");
 
     struct uinput_user_dev dev;
     memset(&dev, 0, sizeof(dev));
@@ -186,17 +236,18 @@ static int create_mouse_device(void) {
     dev.id.version = 0;
 
     if (write(fd, &dev, sizeof(dev)) != (ssize_t)sizeof(dev)) {
-        LOGE("write mouse uinput_user_dev failed: %s", strerror(errno));
+        LOGE("mouse: write uinput_user_dev failed: errno=%d (%s)", errno, strerror(errno));
         close(fd);
         return -1;
     }
+    LOGI("mouse: device descriptor written (\"Gboard+ Mouse\")");
     if (ioctl(fd, UI_DEV_CREATE) < 0) {
-        LOGE("UI_DEV_CREATE (mouse) failed: %s", strerror(errno));
+        LOGE("mouse: UI_DEV_CREATE failed: errno=%d (%s)", errno, strerror(errno));
         close(fd);
         return -1;
     }
     usleep(200 * 1000);
-    LOGI("virtual mouse created");
+    LOGI("mouse: UI_DEV_CREATE ok — virtual mouse created");
     return fd;
 }
 
@@ -263,9 +314,10 @@ static void apply_both(int pad_fd, int mouse_fd, const Frame *cur, Frame *state)
 static int make_server_socket(void) {
     int s = socket(AF_UNIX, SOCK_STREAM, 0);
     if (s < 0) {
-        LOGE("socket failed: %s", strerror(errno));
+        LOGE("socket: socket() failed: errno=%d (%s)", errno, strerror(errno));
         return -1;
     }
+    LOGI("socket: created (fd=%d)", s);
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
@@ -274,22 +326,49 @@ static int make_server_socket(void) {
     socklen_t len = (socklen_t)(offsetof(struct sockaddr_un, sun_path)
                                 + 1 + strlen(SOCK_NAME));
     if (bind(s, (struct sockaddr *)&addr, len) < 0) {
-        LOGE("bind @%s failed: %s (already running?)", SOCK_NAME, strerror(errno));
+        LOGE("socket: bind @%s failed: errno=%d (%s) (already running?)",
+             SOCK_NAME, errno, strerror(errno));
         close(s);
         return -1;
     }
+    LOGI("socket: bind @%s ok", SOCK_NAME);
     if (listen(s, 2) < 0) {
-        LOGE("listen failed: %s", strerror(errno));
+        LOGE("socket: listen failed: errno=%d (%s)", errno, strerror(errno));
         close(s);
         return -1;
     }
+    LOGI("socket: listen ok");
     return s;
 }
 
 int main(int argc, char **argv) {
+    int want_daemonize = 0;
+    const char *log_path = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--daemonize") == 0) {
-            if (daemon(0, 0) < 0) LOGE("daemon() failed: %s", strerror(errno));
+            want_daemonize = 1;
+        } else if (strcmp(argv[i], "--log") == 0 && i + 1 < argc) {
+            log_path = argv[++i];
+        }
+    }
+    // Open the log file BEFORE daemonize: the FILE* survives the fork, and
+    // after daemon(0, 0) stderr points at /dev/null, so the file copy of the
+    // log is the only trace the app can show the user.
+    if (log_path) {
+        g_log_file = fopen(log_path, "a");
+        if (!g_log_file) {
+            fprintf(stderr, "gamepadd: cannot open --log %s: %s\n",
+                    log_path, strerror(errno));
+        }
+    }
+    LOGI("gamepadd starting (pid=%d, uid=%d, daemonize=%d, log=%s)",
+         (int)getpid(), (int)getuid(), want_daemonize,
+         log_path ? log_path : "-");
+    if (want_daemonize) {
+        if (daemon(0, 0) < 0) {
+            LOGE("daemon() failed: errno=%d (%s)", errno, strerror(errno));
+        } else {
+            LOGI("daemonized (pid=%d)", (int)getpid());
         }
     }
     signal(SIGINT, on_signal);
@@ -297,10 +376,14 @@ int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
 
     int uinput = create_device();
-    if (uinput < 0) return 1;
+    if (uinput < 0) {
+        LOGE("init: pad creation failed — exiting");
+        return 1;
+    }
 
     int mouse = create_mouse_device();
     if (mouse < 0) {
+        LOGE("init: mouse creation failed — exiting");
         ioctl(uinput, UI_DEV_DESTROY);
         close(uinput);
         return 1;
@@ -308,6 +391,7 @@ int main(int argc, char **argv) {
 
     int server = make_server_socket();
     if (server < 0) {
+        LOGE("init: server socket failed — exiting");
         ioctl(mouse, UI_DEV_DESTROY);
         close(mouse);
         ioctl(uinput, UI_DEV_DESTROY);
@@ -323,7 +407,7 @@ int main(int argc, char **argv) {
         int client = accept(server, NULL, NULL);
         if (client < 0) {
             if (errno == EINTR) continue;
-            LOGE("accept failed: %s", strerror(errno));
+            LOGE("accept failed: errno=%d (%s)", errno, strerror(errno));
             break;
         }
         LOGI("client connected");

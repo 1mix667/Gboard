@@ -57,6 +57,7 @@ import android.view.inputmethod.InputContentInfo
 import android.view.inputmethod.TextAttribute
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.GridLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupWindow
@@ -345,7 +346,7 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
     @Volatile private var gameContentRef: ViewGroup? = null  // keyboard content layout of the live input view
     private val GAME_PANEL_TAG = "gbp_game_panel"
     private val WIN_PANEL_TAG = "gbp_win_panel"
-    private val PAD_PANEL_HEIGHT_DP = 258f
+    private val PAD_PANEL_HEIGHT_DP = 328f
     private val WIN_PANEL_HEIGHT_DP = 272f
     // Win panel width cap: on wide screens (landscape phones/tablets) the
     // full-width 100% keyboard stretches keys into huge ovals. Cap the panel
@@ -2651,9 +2652,12 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
         }
     }
 
-    /** The Xbox gamepad panel (v2 — replaces the WASD pad). Two zones:
-     *  left = LB/LT + left stick + D-pad + L3; right = RB/RT + ABXY +
-     *  right stick + R3; a narrow center column holds Back/Start + status. */
+    /** The Xbox gamepad panel (v2 — replaces the WASD pad). Real-controller
+     *  geometry: two zones with tight fixed-size clusters — left = LB|LT row,
+     *  left stick, compact L3 under the stick, D-pad as a dense 3×3 grid;
+     *  right = RB|RT row, ABXY as a dense 3×3 diamond, right stick, compact
+     *  R3 under it; a narrow center column holds status + Back/Start + the
+     *  mouse buttons. */
     private fun buildPadPanel(ctx: Context): LinearLayout {
         val dp = ctx.resources.displayMetrics.density
         fun colLp(weight: Float) = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, weight)
@@ -2662,6 +2666,20 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
         fun btnLp(weight: Float, heightDp: Float) =
             LinearLayout.LayoutParams(0, (heightDp * dp).toInt(), weight).apply {
                 val m = (3f * dp).toInt(); setMargins(m, m, m, m)
+            }
+        // Fixed-size box (shoulders, sticks, L3/R3): clusters never stretch
+        // with weights — a controller's buttons are all the same size.
+        fun fixedLp(wDp: Float, hDp: Float, mDp: Float = 3f) =
+            LinearLayout.LayoutParams((wDp * dp).toInt(), (hDp * dp).toInt()).apply {
+                val m = (mDp * dp).toInt(); setMargins(m, m, m, m)
+            }
+        // One cell of a 3×3 cluster grid (D-pad / ABXY): 2dp margins on every
+        // side give the ~4dp gaps between neighbours.
+        fun cellLp(row: Int, col: Int, sizeDp: Float) =
+            GridLayout.LayoutParams(GridLayout.spec(row), GridLayout.spec(col)).apply {
+                width = (sizeDp * dp).toInt()
+                height = (sizeDp * dp).toInt()
+                val m = (2f * dp).toInt(); setMargins(m, m, m, m)
             }
 
         val panel = LinearLayout(ctx).apply {
@@ -2674,42 +2692,52 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
         }
 
         // ── Left zone ──
-        val left = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-        val shouldersL = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        val left = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        val shouldersL = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
         shouldersL.addView(
             panelHoldButton(ctx, "LB", 13f, false,
                 { padSetButton(GamepadProto.BTN_LB, true) }, { padSetButton(GamepadProto.BTN_LB, false) }),
-            btnLp(1f, 30f))
+            fixedLp(76f, 34f))
         shouldersL.addView(
             panelHoldButton(ctx, "LT", 13f, false,
                 { padSetTrigger(true, 255) }, { padSetTrigger(true, 0) }),
-            btnLp(1f, 30f))
-        left.addView(shouldersL, rowLp(36f))
+            fixedLp(76f, 34f))
+        left.addView(shouldersL, rowLp(40f))
 
         val stickL = StickView(ctx)
         stickL.onMove = { x, y -> padSetStick(true, x, y) }
-        left.addView(stickL, rowLp(92f))
+        left.addView(stickL, fixedLp(80f, 80f, 0f))
 
-        val dpad = FrameLayout(ctx)
-        val dSize = (30f * dp).toInt()
-        fun dBtn(label: String, dir: Int, gravity: Int): TextView {
-            val b = panelHoldButton(ctx, label, 13f, false,
-                { padSetDpad(dir, true) }, { padSetDpad(dir, false) })
-            b.layoutParams = FrameLayout.LayoutParams(dSize, dSize, gravity)
-            return b
-        }
-        dpad.addView(dBtn("▲", 0, Gravity.TOP or Gravity.CENTER_HORIZONTAL))
-        dpad.addView(dBtn("▼", 1, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
-        dpad.addView(dBtn("◀", 2, Gravity.LEFT or Gravity.CENTER_VERTICAL))
-        dpad.addView(dBtn("▶", 3, Gravity.RIGHT or Gravity.CENTER_VERTICAL))
-        left.addView(dpad, rowLp(88f))
-
-        val l3Row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-        l3Row.addView(
+        // L3: compact click-button directly under its stick (no full-width bar).
+        left.addView(
             panelHoldButton(ctx, "L3", 11f, false,
                 { padSetButton(GamepadProto.BTN_L3, true) }, { padSetButton(GamepadProto.BTN_L3, false) }),
-            btnLp(1f, 24f))
-        left.addView(l3Row, rowLp(30f))
+            fixedLp(72f, 36f))
+
+        // D-pad: tight 3×3 grid of fixed 44dp cells — cross layout, the
+        // corners and the center stay empty spacers.
+        val dpad = GridLayout(ctx).apply { rowCount = 3; columnCount = 3 }
+        fun dCell(label: String?, dir: Int, row: Int, col: Int) {
+            if (label == null) {
+                dpad.addView(View(ctx), cellLp(row, col, 44f))
+            } else {
+                dpad.addView(
+                    panelHoldButton(ctx, label, 13f, false,
+                        { padSetDpad(dir, true) }, { padSetDpad(dir, false) }),
+                    cellLp(row, col, 44f))
+            }
+        }
+        dCell(null, -1, 0, 0); dCell("▲", 0, 0, 1); dCell(null, -1, 0, 2)
+        dCell("◀", 2, 1, 0); dCell(null, -1, 1, 1); dCell("▶", 3, 1, 2)
+        dCell(null, -1, 2, 0); dCell("▼", 1, 2, 1); dCell(null, -1, 2, 2)
+        left.addView(dpad, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         panel.addView(left, colLp(1.15f))
 
         // ── Center column: status + Back/Start ──
@@ -2753,42 +2781,52 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
         panel.addView(center, colLp(0.62f))
 
         // ── Right zone ──
-        val right = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-        val shouldersR = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        val right = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        val shouldersR = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
         shouldersR.addView(
             panelHoldButton(ctx, "RB", 13f, false,
                 { padSetButton(GamepadProto.BTN_RB, true) }, { padSetButton(GamepadProto.BTN_RB, false) }),
-            btnLp(1f, 30f))
+            fixedLp(76f, 34f))
         shouldersR.addView(
             panelHoldButton(ctx, "RT", 13f, false,
                 { padSetTrigger(false, 255) }, { padSetTrigger(false, 0) }),
-            btnLp(1f, 30f))
-        right.addView(shouldersR, rowLp(36f))
+            fixedLp(76f, 34f))
+        right.addView(shouldersR, rowLp(40f))
 
-        val abxy = FrameLayout(ctx)
-        val aSize = (40f * dp).toInt()
-        fun aBtn(label: String, bit: Int, gravity: Int): TextView {
-            val b = panelHoldButton(ctx, label, 15f, true,
-                { padSetButton(bit, true) }, { padSetButton(bit, false) })
-            b.layoutParams = FrameLayout.LayoutParams(aSize, aSize, gravity)
-            return b
+        // ABXY: tight diamond — 3×3 grid of round fixed 50dp cells,
+        // Y top, X left, B right, A bottom; corners/center stay empty.
+        val abxy = GridLayout(ctx).apply { rowCount = 3; columnCount = 3 }
+        fun aCell(label: String?, bit: Int, row: Int, col: Int) {
+            if (label == null) {
+                abxy.addView(View(ctx), cellLp(row, col, 50f))
+            } else {
+                abxy.addView(
+                    panelHoldButton(ctx, label, 15f, true,
+                        { padSetButton(bit, true) }, { padSetButton(bit, false) }),
+                    cellLp(row, col, 50f))
+            }
         }
-        abxy.addView(aBtn("Y", GamepadProto.BTN_Y, Gravity.TOP or Gravity.CENTER_HORIZONTAL))
-        abxy.addView(aBtn("X", GamepadProto.BTN_X, Gravity.LEFT or Gravity.CENTER_VERTICAL))
-        abxy.addView(aBtn("B", GamepadProto.BTN_B, Gravity.RIGHT or Gravity.CENTER_VERTICAL))
-        abxy.addView(aBtn("A", GamepadProto.BTN_A, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
-        right.addView(abxy, rowLp(92f))
+        aCell(null, -1, 0, 0); aCell("Y", GamepadProto.BTN_Y, 0, 1); aCell(null, -1, 0, 2)
+        aCell("X", GamepadProto.BTN_X, 1, 0); aCell(null, -1, 1, 1); aCell("B", GamepadProto.BTN_B, 1, 2)
+        aCell(null, -1, 2, 0); aCell("A", GamepadProto.BTN_A, 2, 1); aCell(null, -1, 2, 2)
+        right.addView(abxy, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
         val stickR = StickView(ctx)
         stickR.onMove = { x, y -> padSetStick(false, x, y) }
-        right.addView(stickR, rowLp(88f))
+        right.addView(stickR, fixedLp(70f, 70f, 0f))
 
-        val r3Row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-        r3Row.addView(
+        // R3: compact click-button directly under its stick.
+        right.addView(
             panelHoldButton(ctx, "R3", 11f, false,
                 { padSetButton(GamepadProto.BTN_R3, true) }, { padSetButton(GamepadProto.BTN_R3, false) }),
-            btnLp(1f, 24f))
-        right.addView(r3Row, rowLp(30f))
+            fixedLp(72f, 36f))
         panel.addView(right, colLp(1.15f))
 
         padRefreshStatus()
