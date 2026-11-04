@@ -198,14 +198,36 @@ class GamepadClient {
 
 /**
  * App-side daemon management (MainActivity): extract the bundled daemon
- * binary from assets into filesDir and start it as root. Status checks use
- * the same abstract socket the hook connects to.
+ * binary from assets into filesDir and start it as root.
+ *
+ * The binary lands under a VERSIONED name (gamepadd-<versionCode>): an
+ * already-running daemon survives app updates, so a fixed file name could
+ * leave the app executing a stale binary while a stale PROCESS (started by
+ * an older build, without newer flags like --log) keeps holding the
+ * socket. Versioned names + a verified kill of both names make a start a
+ * clean slate.
+ *
+ * "Daemon is up" is judged from the root side — process found by pidof AND
+ * the abstract socket present in /proc/net/unix — because that is what the
+ * su start script itself can attest. Whether THIS app process can connect
+ * is reported as a separate line; it must not drag the verdict down.
  */
 object GamepadDaemon {
 
-    fun binaryFile(ctx: Context): File = File(ctx.filesDir, GamepadProto.ASSET_NAME)
+    /** Legacy (pre-versioning) binary/process name. */
+    private const val LEGACY_NAME = GamepadProto.ASSET_NAME  // "gamepadd"
 
-    /** Copy assets/gamepadd -> filesDir (refreshing on size drift), chmod 755. */
+    private fun versionedName(): String =
+        "${GamepadProto.ASSET_NAME}-${BuildConfig.VERSION_CODE}"
+
+    /** Every process name a daemon of any build may run under. */
+    private fun daemonNames(): List<String> = listOf(LEGACY_NAME, versionedName())
+
+    fun binaryFile(ctx: Context): File = File(ctx.filesDir, versionedName())
+
+    /** Copy assets/gamepadd -> filesDir/<versioned name> (refreshing on
+     *  size drift) and remove the legacy unversioned copy, so nothing can
+     *  ever exec a stale binary again. */
     fun extract(ctx: Context): File? = try {
         val dst = binaryFile(ctx)
         val assetSize = try {
@@ -215,6 +237,10 @@ object GamepadDaemon {
             ctx.assets.open(GamepadProto.ASSET_NAME).use { input ->
                 FileOutputStream(dst).use { out -> input.copyTo(out) }
             }
+        }
+        val legacy = File(ctx.filesDir, LEGACY_NAME)
+        if (legacy.absolutePath != dst.absolutePath) {
+            try { legacy.delete() } catch (_: Throwable) {}
         }
         dst.setExecutable(true, false)
         dst.setReadable(true, false)
@@ -257,91 +283,181 @@ object GamepadDaemon {
         "(лог не читается: ${t.message})"
     }
 
-    /** True when a gamepadd process exists (checked as root via pidof). */
+    // ── Root-side probing ────────────────────────────────────────────
+    // One su round-trip answers both questions the verdict needs: is a
+    // daemon process alive (pidof over every known name), and is the
+    // abstract socket listening (abstract sockets show up in
+    // /proc/net/unix as @gbp_gamepad). The script prints machine-readable
+    // lines (DAEMON_PIDS=…, SOCKET_LISTEN=yes/no) that we parse back; the
+    // raw output is also shown verbatim on the card.
+
+    private data class Probe(
+        val pids: List<String>,
+        val socketListen: Boolean,
+        val rc: Int,
+        val raw: String
+    )
+
+    /** Shell fragment printing DAEMON_PIDS/SOCKET_LISTEN for all names. */
+    private fun probeShell(): String {
+        val sb = StringBuilder()
+        sb.append("P=\"\"; ")
+        for (n in daemonNames()) {
+            sb.append("Q=\$(pidof $n 2>/dev/null); ")
+            sb.append("if [ -n \"\$Q\" ]; then P=\"\$P \$Q\"; fi; ")
+        }
+        sb.append("echo \"DAEMON_PIDS=\${P# }\"; ")
+        sb.append(
+            "if grep -aq ${GamepadProto.SOCKET_NAME} /proc/net/unix 2>/dev/null; " +
+                "then echo \"SOCKET_LISTEN=yes\"; else echo \"SOCKET_LISTEN=no\"; fi"
+        )
+        return sb.toString()
+    }
+
+    /** Run one `su -c` script, capturing merged stdout+stderr. */
+    private fun suRun(cmd: String): Pair<Int, String> = try {
+        val p = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start()
+        val text = p.inputStream.readBytes().toString(Charsets.UTF_8)
+        p.waitFor() to text
+    } catch (t: Throwable) {
+        -1 to "su error: ${t.message}"
+    }
+
+    private fun suProbe(): Probe {
+        val (rc, out) = suRun(probeShell())
+        var pids = emptyList<String>()
+        var listen = false
+        for (line in out.lineSequence()) {
+            val t = line.trim()
+            if (t.startsWith("DAEMON_PIDS=")) {
+                pids = t.removePrefix("DAEMON_PIDS=").split(' ').filter { it.isNotEmpty() }
+            }
+            if (t == "SOCKET_LISTEN=yes") listen = true
+        }
+        return Probe(pids, listen, rc, out)
+    }
+
+    /** True when su actually refused us (bad rc or a denial in the output)
+     *  — the ONLY case where the "no root access" hint is honest. */
+    private fun rootDenied(rc: Int, out: String): Boolean =
+        rc != 0 || out.contains("denied", ignoreCase = true)
+
+    private const val ROOT_HINT =
+        "Похоже, нет root-доступа: выдай приложению Gboard+ права суперпользователя " +
+            "в менеджере KernelSU и нажми запуск ещё раз"
+
+    /** True when a daemon process exists (root-side pidof, any build). */
     fun isProcessAlive(): Boolean = try {
-        val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "pidof ${GamepadProto.ASSET_NAME}"))
-        p.inputStream.readBytes()  // drain so the process can exit
-        p.waitFor() == 0
+        suProbe().pids.isNotEmpty()
     } catch (_: Throwable) {
         false
     }
 
     /**
-     * Live state for the settings card: (socketUp, detail). The detail names
-     * both checks and appends the daemon log tail, so a screenshot of the
-     * card is a complete bug report.
+     * Live state for the settings card: (daemonUp, detail). daemonUp comes
+     * from the ROOT-side checks (process + listening socket); the app-side
+     * connect attempt is a separate informational line. The detail ends
+     * with the daemon log tail, so a screenshot of the card is a complete
+     * bug report.
      */
     fun diagnose(ctx: Context): Pair<Boolean, String> {
-        val proc = isProcessAlive()
-        val sock = isRunning()
+        val probe = suProbe()
+        val appLink = isRunning()
+        val up = probe.pids.isNotEmpty() && probe.socketListen
         val sb = StringBuilder()
-        sb.append("Процесс: ").append(if (proc) "жив (pidof нашёл gamepadd)" else "не найден")
-        sb.append("\nСокет: ").append(if (sock) "отвечает" else "нет ответа")
+        sb.append("Процесс (su): ")
+            .append(if (probe.pids.isNotEmpty()) "жив, pid ${probe.pids.joinToString(", ")}" else "не найден")
+        sb.append("\nСокет в /proc/net/unix: ").append(if (probe.socketListen) "слушает" else "нет")
+        sb.append("\nСвязь из приложения: ").append(if (appLink) "есть" else "нет")
+        if (rootDenied(probe.rc, probe.raw)) sb.append('\n').append(ROOT_HINT)
+        val raw = probe.raw.trim()
+        if (raw.isNotEmpty()) sb.append("\n— вывод su —\n").append(raw)
         sb.append("\n— лог демона —\n").append(logTail(ctx))
-        return sock to sb.toString()
+        return up to sb.toString()
     }
 
     /**
-     * Extract + (re)start the daemon as root, with the daemon's init log
-     * going to filesDir/gamepadd.log (deleted first, so the log always
-     * belongs to THIS launch). The su command's own stdout/stderr are
-     * captured too. Runs blocking shell work — call from a background
-     * thread. Returns (success, human-readable detail with diagnostics).
+     * Shell fragment: HARD-kill every daemon of any build (legacy and
+     * versioned names) and prove they are gone — up to ~1 s of pidof
+     * retries; prints KILL_FAILED=<pids> if something refuses to die, in
+     * which case its socket bind would sabotage the fresh start.
+     */
+    private fun killShell(): String {
+        val sb = StringBuilder()
+        for (n in daemonNames()) {
+            sb.append("for p in \$(pidof $n 2>/dev/null); do kill -9 \$p 2>/dev/null; done; ")
+        }
+        sb.append("i=0; R=\"x\"; while [ \$i -lt 10 ]; do R=\"\"; ")
+        for (n in daemonNames()) {
+            sb.append("Q=\$(pidof $n 2>/dev/null); ")
+            sb.append("if [ -n \"\$Q\" ]; then R=\"\$R \$Q\"; fi; ")
+        }
+        sb.append("if [ -z \"\$R\" ]; then break; fi; sleep 0.1; i=\$((i+1)); done; ")
+        sb.append("if [ -n \"\$R\" ]; then echo \"KILL_FAILED=\${R# }\"; fi; ")
+        return sb.toString()
+    }
+
+    /**
+     * Extract + HARD-restart the daemon as root, all in ONE su script:
+     * verified kill of every stale daemon → start the versioned binary
+     * with its init log at filesDir/gamepadd.log (deleted first, so the
+     * log always belongs to THIS launch) → the script itself verifies the
+     * result (pidof + socket in /proc/net/unix) and prints it as
+     * DAEMON_PID_NEW/DAEMON_PIDS/SOCKET_LISTEN lines, shown on the card
+     * verbatim. Runs blocking shell work — call from a background thread.
+     * Returns (success, human-readable detail with diagnostics).
      */
     fun start(ctx: Context): Pair<Boolean, String> {
         val bin = extract(ctx) ?: return false to "Не удалось распаковать бинарь демона из APK"
         if (!GbpPrefs.isRootAvailable()) {
-            return false to "Похоже, нет root-доступа: выдай приложению Gboard+ права " +
-                "суперпользователя в менеджере KernelSU и нажми запуск ещё раз\n" +
-                "— лог демона —\n" + logTail(ctx)
+            // This probe is a real `su -c id` uid=0 check, so the hint is
+            // accurate here — unlike a generic post-launch failure.
+            return false to "$ROOT_HINT\n— лог демона —\n" + logTail(ctx)
         }
-        val path = bin.absolutePath
         val log = logFile(ctx)
         try { log.delete() } catch (_: Throwable) {}  // fresh log for this launch
-        // Kill a stale instance (its socket bind would fail anyway), then
-        // start detached; the daemon daemonizes itself on --daemonize.
-        val cmd = "pkill -x ${GamepadProto.ASSET_NAME} 2>/dev/null; sleep 0.3; " +
-            "chmod 755 $path; $path --daemonize --log ${log.absolutePath}"
-        val outBuf = StringBuilder()
-        val rc = try {
-            val p = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start()
-            val reader = Thread {
-                try {
-                    p.inputStream.bufferedReader().forEachLine { line ->
-                        synchronized(outBuf) { outBuf.append(line).append('\n') }
-                    }
-                } catch (_: Throwable) {}
-            }
-            reader.isDaemon = true
-            reader.start()
-            val r = p.waitFor()
-            reader.join(2000)
-            r
-        } catch (t: Throwable) {
-            return false to "su запуск упал: ${t.message}"
+        val cmd = buildString {
+            append(killShell())
+            append("chmod 755 ${bin.absolutePath}; ")
+            append("${bin.absolutePath} --daemonize --log ${log.absolutePath}; ")
+            append("sleep 1; ")
+            append("NV=\$(pidof ${versionedName()} 2>/dev/null); echo \"DAEMON_PID_NEW=\$NV\"; ")
+            append(probeShell())
         }
-        // ~800 ms for the daemon to create the uinput devices and bind the
-        // socket, then verify: process alive? socket answering?
-        Thread.sleep(800)
-        var up = isRunning()
-        if (!up) {  // brief grace — uinput registration can lag a little
-            for (i in 0 until 4) {
-                Thread.sleep(300)
-                if (isRunning()) { up = true; break }
+        val (rc, out) = suRun(cmd)
+        val killFailed = out.lineSequence().any { it.trim().startsWith("KILL_FAILED=") }
+        var newPid = ""
+        var pids = emptyList<String>()
+        var listen = false
+        for (line in out.lineSequence()) {
+            val t = line.trim()
+            when {
+                t.startsWith("DAEMON_PID_NEW=") ->
+                    newPid = t.removePrefix("DAEMON_PID_NEW=").trim()
+                t.startsWith("DAEMON_PIDS=") ->
+                    pids = t.removePrefix("DAEMON_PIDS=").split(' ').filter { it.isNotEmpty() }
+                t == "SOCKET_LISTEN=yes" -> listen = true
             }
         }
-        val suOut = synchronized(outBuf) { outBuf.toString().trim() }
+        val appLink = isRunning()
+        // Success is attested by the root side: the NEW versioned process
+        // is alive AND the socket listens AND no stale daemon survived the
+        // kill (a survivor could be the one holding that socket).
+        val up = listen && newPid.isNotEmpty() && !killFailed
         val sb = StringBuilder()
         if (up) {
-            sb.append("Демон запущен, виртуальный Xbox 360 pad создан")
+            sb.append("Демон работает: процесс жив (pid $newPid), сокет слушает")
         } else {
-            sb.append("Демон не поднялся (su rc=$rc). Похоже, нет root-доступа: выдай " +
-                "приложению Gboard+ права суперпользователя в менеджере KernelSU " +
-                "и нажми запуск ещё раз")
+            sb.append("Демон не поднялся (su rc=$rc)")
+            if (killFailed) sb.append("\nСтарый процесс демона не убился — см. KILL_FAILED в выводе su")
+            if (rootDenied(rc, out)) sb.append('\n').append(ROOT_HINT)
         }
-        sb.append("\nПроцесс: ").append(if (isProcessAlive()) "жив" else "не найден")
-        sb.append("\nСокет: ").append(if (up) "отвечает" else "нет ответа")
-        if (suOut.isNotEmpty()) sb.append("\n— вывод su —\n").append(suOut)
+        sb.append("\nПроцесс (su): ")
+            .append(if (pids.isNotEmpty()) "жив, pid ${pids.joinToString(", ")}" else "не найден")
+        sb.append("\nСокет в /proc/net/unix: ").append(if (listen) "слушает" else "нет")
+        sb.append("\nСвязь из приложения: ").append(if (appLink) "есть" else "нет")
+        val raw = out.trim()
+        if (raw.isNotEmpty()) sb.append("\n— вывод su —\n").append(raw)
         sb.append("\n— лог демона —\n").append(logTail(ctx))
         return up to sb.toString()
     }

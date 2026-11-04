@@ -279,7 +279,14 @@ static void apply_frame(int fd, const Frame *cur, Frame *prev) {
     AXIS(haty, ABS_HAT0Y);
 #undef AXIS
     if (dirty) emit_event(fd, EV_SYN, SYN_REPORT, 0);
-    *prev = *cur;
+    // Copy ONLY the pad-owned fields. A blanket *prev = *cur here would
+    // clobber the mouse half of the state before apply_mouse_frame() diffs
+    // it — mouse buttons would never register a change.
+    prev->buttons = cur->buttons;
+    prev->lx = cur->lx; prev->ly = cur->ly;
+    prev->rx = cur->rx; prev->ry = cur->ry;
+    prev->lt = cur->lt; prev->rt = cur->rt;
+    prev->hatx = cur->hatx; prev->haty = cur->haty;
 }
 
 // Mouse half of a frame: buttons are diffed like the pad's; the relative
@@ -299,16 +306,19 @@ static void apply_mouse_frame(int fd, const Frame *cur, Frame *prev) {
     if (cur->rel_y != 0) { emit_event(fd, EV_REL, REL_Y, cur->rel_y); dirty = 1; }
     if (cur->wheel != 0) { emit_event(fd, EV_REL, REL_WHEEL, cur->wheel); dirty = 1; }
     if (dirty) emit_event(fd, EV_SYN, SYN_REPORT, 0);
-    *prev = *cur;
+    // Copy ONLY the mouse-owned fields; deltas are one-shot, stored as 0.
+    prev->mouse_btns = cur->mouse_btns;
     prev->rel_x = 0;
     prev->rel_y = 0;
     prev->wheel = 0;
 }
 
-// Apply one frame to both virtual devices (pad + mouse).
+// Apply one frame to both virtual devices (pad + mouse). Either fd may be
+// -1 when that device failed to be created — the frame half is skipped
+// (the socket stays up so the failure remains diagnosable).
 static void apply_both(int pad_fd, int mouse_fd, const Frame *cur, Frame *state) {
-    apply_frame(pad_fd, cur, state);
-    apply_mouse_frame(mouse_fd, cur, state);
+    if (pad_fd >= 0) apply_frame(pad_fd, cur, state);
+    if (mouse_fd >= 0) apply_mouse_frame(mouse_fd, cur, state);
 }
 
 static int make_server_socket(void) {
@@ -326,12 +336,12 @@ static int make_server_socket(void) {
     socklen_t len = (socklen_t)(offsetof(struct sockaddr_un, sun_path)
                                 + 1 + strlen(SOCK_NAME));
     if (bind(s, (struct sockaddr *)&addr, len) < 0) {
-        LOGE("socket: bind @%s failed: errno=%d (%s) (already running?)",
-             SOCK_NAME, errno, strerror(errno));
+        LOGE("socket: bind @%s failed (addrlen=%d): errno=%d (%s) (already running?)",
+             SOCK_NAME, (int)len, errno, strerror(errno));
         close(s);
         return -1;
     }
-    LOGI("socket: bind @%s ok", SOCK_NAME);
+    LOGI("socket: bind @%s ok (addrlen=%d)", SOCK_NAME, (int)len);
     if (listen(s, 2) < 0) {
         LOGE("socket: listen failed: errno=%d (%s)", errno, strerror(errno));
         close(s);
@@ -375,30 +385,29 @@ int main(int argc, char **argv) {
     signal(SIGTERM, on_signal);
     signal(SIGPIPE, SIG_IGN);
 
-    int uinput = create_device();
-    if (uinput < 0) {
-        LOGE("init: pad creation failed — exiting");
-        return 1;
-    }
-
-    int mouse = create_mouse_device();
-    if (mouse < 0) {
-        LOGE("init: mouse creation failed — exiting");
-        ioctl(uinput, UI_DEV_DESTROY);
-        close(uinput);
-        return 1;
-    }
-
+    // The server socket goes up FIRST, before any uinput work: if device
+    // creation fails or stalls on some device, the socket still listens,
+    // so the app's checks (pidof + /proc/net/unix + connect) can see the
+    // daemon and the log can say exactly which half is broken. A daemon
+    // that binds only after uinput is indistinguishable from a dead one.
     int server = make_server_socket();
     if (server < 0) {
         LOGE("init: server socket failed — exiting");
-        ioctl(mouse, UI_DEV_DESTROY);
-        close(mouse);
-        ioctl(uinput, UI_DEV_DESTROY);
-        close(uinput);
         return 1;
     }
     LOGI("listening on abstract socket @%s", SOCK_NAME);
+
+    int uinput = create_device();
+    if (uinput < 0) {
+        LOGE("init: pad creation failed — socket stays up, pad frames dropped");
+    }
+    int mouse = create_mouse_device();
+    if (mouse < 0) {
+        LOGE("init: mouse creation failed — socket stays up, mouse frames dropped");
+    }
+    if (uinput < 0 && mouse < 0) {
+        LOGE("init: NO virtual devices — daemon is a socket sink only");
+    }
 
     Frame state;
     memset(&state, 0, sizeof(state));
@@ -413,6 +422,7 @@ int main(int argc, char **argv) {
         LOGI("client connected");
         uint8_t buf[FRAME_SIZE];
         size_t have = 0;
+        int frames = 0;
         while (!g_stop) {
             ssize_t n = read(client, buf + have, FRAME_SIZE - have);
             if (n == 0) break;  // EOF — client gone
@@ -424,12 +434,17 @@ int main(int argc, char **argv) {
             if (have == FRAME_SIZE) {
                 Frame cur;
                 memcpy(&cur, buf, FRAME_SIZE);
-                apply_both(uinput, mouse, &cur, &state);
+                frames++;
+                if (uinput >= 0 || mouse >= 0) {
+                    apply_both(uinput, mouse, &cur, &state);
+                } else if (frames == 1) {
+                    LOGE("frame dropped: no virtual devices (see init errors above)");
+                }
                 have = 0;
             }
         }
         close(client);
-        LOGI("client disconnected — zeroing state");
+        LOGI("client disconnected (%d frames) — zeroing state", frames);
         Frame zero;
         memset(&zero, 0, sizeof(zero));
         apply_both(uinput, mouse, &zero, &state);
@@ -439,10 +454,14 @@ int main(int argc, char **argv) {
     memset(&zero, 0, sizeof(zero));
     apply_both(uinput, mouse, &zero, &state);
     close(server);
-    ioctl(mouse, UI_DEV_DESTROY);
-    close(mouse);
-    ioctl(uinput, UI_DEV_DESTROY);
-    close(uinput);
+    if (mouse >= 0) {
+        ioctl(mouse, UI_DEV_DESTROY);
+        close(mouse);
+    }
+    if (uinput >= 0) {
+        ioctl(uinput, UI_DEV_DESTROY);
+        close(uinput);
+    }
     LOGI("bye");
     return 0;
 }

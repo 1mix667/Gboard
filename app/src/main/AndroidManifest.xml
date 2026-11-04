@@ -25,13 +25,18 @@
         <!-- Invisible strip activity that summons Gboard over any app,
              launched by the Quick Settings tiles below. Window is an ~8dp
              strip at the top; its EditText holds focus so the system raises
-             the IME over apps that have no text field (Parsec). -->
+             the IME over apps that have no text field (Parsec).
+             It MUST live in its own task (taskAffinity + singleInstance):
+             in the app's default task, launching it drags the whole task —
+             MainActivity included — to the front, so the strip ends up over
+             the settings UI instead of over the current app (Parsec). -->
         <activity
             android:name=".ShowKeyboardActivity"
             android:exported="false"
             android:excludeFromRecents="true"
             android:noHistory="true"
-            android:launchMode="singleTop"
+            android:launchMode="singleInstance"
+            android:taskAffinity="io.github.imix667.gboardplus.summon"
             android:theme="@style/Theme.GboardPlus.Translucent"
             android:windowSoftInputMode="stateVisible" />
 

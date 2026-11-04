@@ -32,6 +32,11 @@ import android.widget.EditText
  * [GbpPrefs.setPendingPanelMode]. The hook consumes the stamp at
  * onStartInputView and opens the matching panel (see GboardPlusHook).
  *
+ * Tasking: the activity lives in its OWN task (manifest taskAffinity
+ * ".summon" + launchMode singleInstance, intents carry NEW_TASK). In the
+ * app's default task it would drag MainActivity to the front with it and
+ * the strip would sit over the settings UI instead of over Parsec.
+ *
  * Everything here is plain framework API (no Compose), so this file also
  * compiles standalone in the local kotlinc check.
  */
