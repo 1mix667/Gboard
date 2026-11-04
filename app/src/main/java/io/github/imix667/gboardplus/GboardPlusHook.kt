@@ -344,6 +344,11 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
     private val PANEL_WIN = 2
     @Volatile private var panelMode = PANEL_NONE
     @Volatile private var gameContentRef: ViewGroup? = null  // keyboard content layout of the live input view
+    // One-shot panel mode handed over by the QS tiles (consumePendingPanelMode):
+    // the app stamps pending_panel_mode + its write time into the shared prefs;
+    // a stamp is consumed at most once per Gboard process, so re-reads of the
+    // same prefs blob can never re-open a panel on a later, unrelated show.
+    @Volatile private var lastConsumedPanelTs = 0L
     private val GAME_PANEL_TAG = "gbp_game_panel"
     private val WIN_PANEL_TAG = "gbp_win_panel"
     private val PAD_PANEL_HEIGHT_DP = 328f
@@ -812,6 +817,11 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
                         // inputType == 0 → input restarted on something that holds no text.
                         if ((param.args[0] as? EditorInfo)?.inputType == 0) inputRestartedNonEditable = true
                         try { refreshPrefs(ims.applicationContext); registerShake(ims.applicationContext) } catch (_: Throwable) {}
+                        // QS-tile hand-off: if the app stamped a pending panel
+                        // mode just before summoning this keyboard (tiles call
+                        // the keyboard up over apps with no text field), open
+                        // that panel now — exactly once per stamp.
+                        try { consumePendingPanelMode(ims.applicationContext, ims) } catch (_: Throwable) {}
                         // Win-panel width depends on the current screen width, so
                         // re-apply it on every show: a rotation while the panel is
                         // open (or between shows) must re-cap / un-cap it, not keep
@@ -3135,6 +3145,49 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
         } catch (_: Throwable) {}
         panelSavedBgs.clear()
         panelSeeThrough = false
+    }
+
+    /**
+     * QS-tile hand-off. The Gboard+ app stamps `pending_panel_mode`
+     * ("pad"/"win") + `pending_panel_mode_ts` into the shared prefs right
+     * before summoning the keyboard over another app (ShowKeyboardActivity,
+     * launched from the Quick Settings tiles). When input starts, consume a
+     * fresh stamp exactly once and open that panel.
+     *
+     * Reset semantics: the app's prefs blob keeps the key until the next
+     * summon overwrites it, so consumption is tracked locally —
+     * [lastConsumedPanelTs] guarantees a stamp fires at most once in this
+     * process, and the 30 s freshness window guarantees a stamp left over
+     * across a Gboard restart can never hijack a later, unrelated show.
+     */
+    private fun consumePendingPanelMode(ctx: Context, ims: InputMethodService) {
+        try {
+            var modeStr = filePrefCache?.get("pending_panel_mode")
+            var ts = filePrefCache?.get("pending_panel_mode_ts")?.toLongOrNull() ?: 0L
+            if (modeStr.isNullOrEmpty()) {
+                // The pushed blob may not have landed yet — ask the app's
+                // provider for its live prefs (root-free, synchronous).
+                val fresh = readPrefsViaProvider(ctx)
+                if (fresh != null) {
+                    modeStr = fresh["pending_panel_mode"]
+                    ts = fresh["pending_panel_mode_ts"]?.toLongOrNull() ?: 0L
+                }
+            }
+            if (modeStr.isNullOrEmpty() || ts <= 0L) return
+            if (ts <= lastConsumedPanelTs) return   // already consumed
+            val now = System.currentTimeMillis()
+            if (now - ts > 30_000L || ts - now > 5_000L) return   // stale / clock skew
+            val mode = when (modeStr) {
+                "pad" -> PANEL_PAD
+                "win" -> PANEL_WIN
+                else -> return
+            }
+            lastConsumedPanelTs = ts   // consume BEFORE applying: never twice
+            XposedBridge.log("$TAG [GAME] QS tile panel mode: $modeStr")
+            setPanelMode(ctx, ims, mode)
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG [GAME] consumePendingPanelMode failed: $t")
+        }
     }
 
     /**

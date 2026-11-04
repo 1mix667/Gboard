@@ -294,6 +294,12 @@ private fun GamepadDaemonCard() {
                     "Parsec видит его как железный контроллер. Запусти демон, затем открой клавиатуру и нажми 🎮. Нужен root.",
                 style = MaterialTheme.typography.bodySmall
             )
+            Text(
+                "Плитки вызова клавиатуры: добавь «Клавиатура», «🎮 Геймпад» и «Win» в быстрые настройки " +
+                    "(редактирование шторки) — по тапу клавиатура всплывёт поверх любого приложения, сразу в нужном режиме.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             if (detail != null) {
                 // Diagnostics: verdict reason + captured su output + the last
                 // lines of the daemon's own log, monospace so a screenshot of

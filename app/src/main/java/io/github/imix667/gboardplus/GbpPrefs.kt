@@ -48,6 +48,48 @@ object GbpPrefs {
         } catch (t: Throwable) { Log.d(TAG, "pushToGboard failed: $t") }
     }
 
+    // ── One-shot panel mode (QS tiles → hook) ──────────────────────────
+    // The Quick Settings tiles summon the keyboard over apps that have no
+    // text field (Parsec). Right before the summon, the requested panel is
+    // stamped here as pending_panel_mode + a millisecond timestamp; the
+    // stamp rides the ordinary prefs channels (this SharedPreferences file
+    // is exactly what GbpPrefsProvider serves and what publish()/push
+    // mirror), and the hook consumes it once when input starts. The stamp
+    // makes the hand-off idempotent: re-reads of the same blob can never
+    // re-trigger the panel, and the hook ignores stamps older than 30 s.
+
+    const val KEY_PENDING_PANEL_MODE = "pending_panel_mode"
+    const val KEY_PENDING_PANEL_MODE_TS = "pending_panel_mode_ts"
+
+    /** Stamp [mode] ("pad"/"win") as the pending panel, or clear it (null). */
+    fun setPendingPanelMode(ctx: Context, mode: String?) {
+        val e = prefs(ctx).edit()
+        if (mode == null) {
+            e.remove(KEY_PENDING_PANEL_MODE).remove(KEY_PENDING_PANEL_MODE_TS)
+        } else {
+            e.putString(KEY_PENDING_PANEL_MODE, mode)
+            e.putLong(KEY_PENDING_PANEL_MODE_TS, System.currentTimeMillis())
+        }
+        e.apply()
+        // Fast root-free push so a running hook sees the stamp immediately;
+        // the hook also reads the provider directly when input starts.
+        try { pushToGboard(ctx, toJson(ctx)) } catch (_: Throwable) {}
+    }
+
+    /** Timestamp of the current pending-panel stamp, or 0 when none. */
+    fun pendingPanelModeTs(ctx: Context): Long =
+        prefs(ctx).getLong(KEY_PENDING_PANEL_MODE_TS, 0L)
+
+    /** Drop the pending stamp only if it is still the write stamped [ts]. */
+    fun clearPendingPanelModeIfTs(ctx: Context, ts: Long) {
+        if (ts <= 0L) return
+        if (prefs(ctx).getLong(KEY_PENDING_PANEL_MODE_TS, 0L) != ts) return
+        prefs(ctx).edit()
+            .remove(KEY_PENDING_PANEL_MODE).remove(KEY_PENDING_PANEL_MODE_TS)
+            .apply()
+        try { pushToGboard(ctx, toJson(ctx)) } catch (_: Throwable) {}
+    }
+
     /** Write first-run defaults so the published blob always exists for the hook. */
     fun ensureDefaults(ctx: Context) {
         val prefs = prefs(ctx)

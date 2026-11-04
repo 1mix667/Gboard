@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Gamepad silhouette for the «🎮 Геймпад» QS tile. fillType=evenOdd
+     punches the D-pad and button holes out of the body. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M17.6,7.5 H6.4 C4,7.5 2,9.9 2,12.6 C2,15.3 3.6,17.5 5.9,17.5 C7.3,17.5 8.4,16.8 9.2,15.7 H14.8 C15.6,16.8 16.7,17.5 18.1,17.5 C20.4,17.5 22,15.3 22,12.6 C22,9.9 20,7.5 17.6,7.5 Z M7,9.9 h2 v4.2 h-2 Z M5.9,11 h4.2 v2 h-4.2 Z M15.6,10 h1.7 v1.7 h-1.7 Z M17.9,12.3 h1.7 v1.7 h-1.7 Z" />
+</vector>

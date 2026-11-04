@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Four-panes glyph for the «Win» QS tile. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M4,4 h7.2 v7.2 H4 Z M12.8,4 H20 v7.2 h-7.2 Z M4,12.8 h7.2 V20 H4 Z M12.8,12.8 H20 V20 h-7.2 Z" />
+</vector>

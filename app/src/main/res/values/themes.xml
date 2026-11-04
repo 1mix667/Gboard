@@ -8,4 +8,11 @@
         <item name="android:windowSplashScreenBackground">@color/splash_bg</item>
         <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
     </style>
+
+    <!-- ShowKeyboardActivity: a fully transparent strip window, so the app
+         underneath (Parsec) stays visible around the summoned keyboard. -->
+    <style name="Theme.GboardPlus.Translucent" parent="android:Theme.Translucent.NoTitleBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+    </style>
 </resources>

@@ -22,6 +22,54 @@
             </intent-filter>
         </activity>
 
+        <!-- Invisible strip activity that summons Gboard over any app,
+             launched by the Quick Settings tiles below. Window is an ~8dp
+             strip at the top; its EditText holds focus so the system raises
+             the IME over apps that have no text field (Parsec). -->
+        <activity
+            android:name=".ShowKeyboardActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.GboardPlus.Translucent"
+            android:windowSoftInputMode="stateVisible" />
+
+        <!-- Quick Settings tiles: one-tap keyboard summon from the shade.
+             The user adds the tiles they want in the shade editor. -->
+        <service
+            android:name=".KeyboardTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_toolbar"
+            android:label="Клавиатура"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".GamepadTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_gamepad"
+            android:label="🎮 Геймпад"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".WinTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_win"
+            android:label="Win"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
         <!-- Read-only prefs mirror, isolated from Auto Expand's authority.
              forceQueryable lets Gboard's process read it despite Android 11+ package
              visibility (the hook is injected into Gboard, which can't see this app). -->
