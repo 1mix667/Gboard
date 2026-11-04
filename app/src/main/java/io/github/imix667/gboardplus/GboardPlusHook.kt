@@ -9,11 +9,13 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.graphics.PixelFormat
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.RectF
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.hardware.Sensor
@@ -365,6 +367,18 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
     private val PANEL_TOUCHPAD_FILL = Color.parseColor("#7317171F")     // #17171F @ 45%
     private val PANEL_TOUCHPAD_STROKE = Color.parseColor("#D93A3A4A")   // #3A3A4A @ 85%
     private val PANEL_STICK_KNOB_ACTIVE = Color.parseColor("#CC3A4066") // #3A4066 @ 80%
+    // ── Whole-window see-through for panel modes ──
+    // v1.2.3 made the PANELS translucent, but the user still saw Gboard's own
+    // theme behind them (solid color / theme picture), not the app below:
+    // the IME window surface itself is opaque, and the InputView + its
+    // containers paint the theme background. So while a panel is active,
+    // applyPanelSeeThrough() additionally (a) makes the window surface
+    // transparent + TRANSLUCENT and (b) clears the background of every view
+    // between the panels and the InputView root. Originals are saved here on
+    // first clear and restored verbatim when panel mode ends — the normal
+    // keyboard must never be left without its theme background.
+    private val panelSavedBgs = java.util.IdentityHashMap<View, Drawable?>()
+    @Volatile private var panelSeeThrough = false
     private val heldKeys = mutableMapOf<Int, Long>()          // keyCode -> downTime (synchronized)
     // Toolbar toggle views (latest built toolbar) for alpha refresh on mode change.
     @Volatile private var padToggleView: View? = null
@@ -807,6 +821,16 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
                                 setPanelMode(ims.applicationContext, ims, PANEL_WIN)
                             }
                         } catch (_: Throwable) {}
+                        // Panel modes need the whole IME window see-through
+                        // (see applyPanelSeeThrough). Re-assert on EVERY show
+                        // while a panel is active: the window pixel format in
+                        // particular may only take effect from the next show
+                        // when it was set while the window was already visible.
+                        try {
+                            if (panelMode != PANEL_NONE && gameContentRef != null) {
+                                applyPanelSeeThrough(ims)
+                            }
+                        } catch (_: Throwable) {}
                         // Screenshot capture must not depend on the toolbar being injected:
                         // the toolbar needs a real editor, and Gboard is also brought up over
                         // targets that hold no text at all. Opening the vault here costs one
@@ -834,6 +858,10 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
                         if (panelMode != PANEL_NONE) {
                             panelMode = PANEL_NONE
                             padResetAll()
+                            // Panel mode ends with the keyboard: put Gboard's
+                            // theme backgrounds back so the next normal show
+                            // is not left see-through.
+                            try { restorePanelBackgrounds() } catch (_: Throwable) {}
                             gameContentRef = null
                         }
                     }
@@ -2980,6 +3008,98 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
     }
 
     /**
+     * Make the WHOLE IME window see-through while a panel is active, so the
+     * app underneath (Parsec) shows through the keyboard area — not just the
+     * panel views (v1.2.3) but everything behind them:
+     *  1. The window itself: transparent background + TRANSLUCENT pixel
+     *     format, otherwise the compositor treats the IME surface as opaque
+     *     and nothing below it can ever be visible.
+     *  2. Every view background between the panels and the InputView root
+     *     (content layout, .keyboard-base-area frame, InputView, siblings)
+     *     is cleared; originals are saved in [panelSavedBgs] for exact
+     *     restore by [restorePanelBackgrounds].
+     * Safe to call repeatedly: the window format is re-asserted on every
+     * call (it may only take effect from the next show if set while the
+     * window is already visible), and already-saved views are skipped.
+     */
+    private fun applyPanelSeeThrough(ims: InputMethodService) {
+        try {
+            try {
+                val win = ims.window?.window
+                if (win != null) {
+                    win.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+                    try { win.setFormat(PixelFormat.TRANSLUCENT) } catch (_: Throwable) {}
+                    try {
+                        val attrs = win.attributes
+                        if (attrs.format != PixelFormat.TRANSLUCENT) {
+                            attrs.format = PixelFormat.TRANSLUCENT
+                            win.attributes = attrs
+                        }
+                    } catch (_: Throwable) {}
+                }
+            } catch (_: Throwable) {}
+
+            val content = gameContentRef ?: return
+            // Root of this input view: walk the parent chain up from the
+            // content layout (… → FrameLayout(.keyboard-base-area) → InputView).
+            var root: View = content
+            while (true) {
+                val p = root.parent as? View ?: break
+                root = p
+            }
+            clearBackgroundsRecursive(root)
+            if (!panelSeeThrough) {
+                XposedBridge.log("$TAG [GAME] see-through ON, saved ${panelSavedBgs.size} backgrounds")
+            }
+            panelSeeThrough = true
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG [GAME] applyPanelSeeThrough failed: $t")
+        }
+    }
+
+    // Clear one view's not-fully-transparent background (saving the original
+    // first), then recurse into children — except OUR branches: the panels
+    // keep their translucent fills from v1.2.3 and the toolbar's background
+    // is already transparent.
+    private fun clearBackgroundsRecursive(view: View) {
+        val tag = view.tag?.toString() ?: ""
+        if (tag == GAME_PANEL_TAG || tag == WIN_PANEL_TAG || tag == "gbp_kb_toolbar") return
+        val bg = view.background
+        if (bg != null && bg.opacity != PixelFormat.TRANSPARENT && !panelSavedBgs.containsKey(view)) {
+            panelSavedBgs[view] = bg
+            view.setBackgroundColor(Color.TRANSPARENT)
+        }
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                view.getChildAt(i)?.let { clearBackgroundsRecursive(it) }
+            }
+        }
+    }
+
+    /**
+     * Undo [applyPanelSeeThrough]'s view changes: put every saved background
+     * back on its own view. The window background/format are deliberately
+     * left as-is: with the view backgrounds restored the normal keyboard is
+     * fully opaque again anyway, and Gboard repaints its window on the next
+     * show. View restore is NOT optional — normal Gboard must keep its theme.
+     */
+    private fun restorePanelBackgrounds() {
+        if (panelSavedBgs.isEmpty()) {
+            panelSeeThrough = false
+            return
+        }
+        val count = panelSavedBgs.size
+        try {
+            for ((view, bg) in panelSavedBgs) {
+                try { view.background = bg } catch (_: Throwable) {}
+            }
+            XposedBridge.log("$TAG [GAME] see-through OFF, restored $count backgrounds")
+        } catch (_: Throwable) {}
+        panelSavedBgs.clear()
+        panelSeeThrough = false
+    }
+
+    /**
      * Switch the active panel. PAD/WIN = hide Gboard's key grid and show that
      * panel instead. NONE = restore the grid, release anything held, zero the
      * gamepad and drop the modifier latch.
@@ -2988,6 +3108,9 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
         panelMode = mode
         val content = gameContentRef
         if (content == null) {
+            // No live input view (e.g. mode reset while hidden): still put
+            // back any backgrounds a panel session cleared.
+            if (mode == PANEL_NONE) restorePanelBackgrounds()
             refreshPanelToggleAlphas()
             return
         }
@@ -3032,6 +3155,12 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
                     winLatch.clear()
                     winLatchPainters.forEach { try { it() } catch (_: Throwable) {} }
                 }
+                // Leaving panel modes: Gboard's theme backgrounds go back.
+                restorePanelBackgrounds()
+            } else {
+                // Entering / re-showing a panel: the whole IME window must
+                // be see-through, not just the panel (see applyPanelSeeThrough).
+                applyPanelSeeThrough(ims)
             }
             XposedBridge.log("$TAG [GAME] panelMode=$mode")
         } catch (t: Throwable) {

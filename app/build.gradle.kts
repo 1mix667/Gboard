@@ -21,8 +21,8 @@ android {
         applicationId = "io.github.imix667.gboardplus"
         minSdk = 35
         targetSdk = 36
-        versionCode = 6
-        versionName = "1.2.3-game2"
+        versionCode = 7
+        versionName = "1.2.4-game2"
         ndk {
             abiFilters += "arm64-v8a"
         }
