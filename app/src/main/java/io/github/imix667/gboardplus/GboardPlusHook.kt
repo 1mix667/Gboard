@@ -352,6 +352,19 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
     // deliberately NOT capped — its split edge layout is by design.
     private val WIN_PANEL_MAX_WIDTH_DP = 620f
     private val WIN_PANEL_WIDE_THRESHOLD_DP = 640f
+    // Translucent panel palette: in Parsec the game stream must stay visible
+    // THROUGH both panels, so panel roots are fully transparent and every
+    // fill is the old opaque color at reduced alpha — key fills ~45%,
+    // strokes ~85%, labels/status stay fully opaque for readability.
+    // Pressed / latched / grabbed states use a denser fill (~75–80%) and a
+    // full-opacity accent stroke so they remain obvious over the game.
+    private val PANEL_KEY_FILL = Color.parseColor("#7323232E")          // #23232E @ 45%
+    private val PANEL_KEY_FILL_ACTIVE = Color.parseColor("#BF23232E")   // #23232E @ 75%
+    private val PANEL_KEY_STROKE = Color.parseColor("#D97C8AFF")        // #7C8AFF @ 85%
+    private val PANEL_LATCH_FILL = Color.parseColor("#CC3D4470")        // #3D4470 @ 80%
+    private val PANEL_TOUCHPAD_FILL = Color.parseColor("#7317171F")     // #17171F @ 45%
+    private val PANEL_TOUCHPAD_STROKE = Color.parseColor("#D93A3A4A")   // #3A3A4A @ 85%
+    private val PANEL_STICK_KNOB_ACTIVE = Color.parseColor("#CC3A4066") // #3A4066 @ 80%
     private val heldKeys = mutableMapOf<Int, Long>()          // keyCode -> downTime (synchronized)
     // Toolbar toggle views (latest built toolbar) for alpha refresh on mode change.
     @Volatile private var padToggleView: View? = null
@@ -2286,8 +2299,8 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
             background = GradientDrawable().apply {
                 shape = if (oval) GradientDrawable.OVAL else GradientDrawable.RECTANGLE
                 if (!oval) cornerRadius = 10f * dp
-                setColor(Color.parseColor("#23232E"))
-                setStroke(normalStroke, accent)
+                setColor(PANEL_KEY_FILL)
+                setStroke(normalStroke, PANEL_KEY_STROKE)
             }
             isClickable = true
             isFocusable = false
@@ -2297,12 +2310,18 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
                 when (ev.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                        (v.background as? GradientDrawable)?.setStroke(pressedStroke, accent)
+                        (v.background as? GradientDrawable)?.apply {
+                            setStroke(pressedStroke, accent)
+                            setColor(PANEL_KEY_FILL_ACTIVE)
+                        }
                         onDown()
                         true
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        (v.background as? GradientDrawable)?.setStroke(normalStroke, accent)
+                        (v.background as? GradientDrawable)?.apply {
+                            setStroke(normalStroke, PANEL_KEY_STROKE)
+                            setColor(PANEL_KEY_FILL)
+                        }
                         onUp()
                         true
                     }
@@ -2460,10 +2479,10 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
             val knobR = baseR * 0.42f
             paint.style = Paint.Style.STROKE
             paint.strokeWidth = 2f * dp
-            paint.color = Color.parseColor("#7C8AFF")
+            paint.color = PANEL_KEY_STROKE
             canvas.drawCircle(cx, cy, baseR, paint)
             paint.style = Paint.Style.FILL
-            paint.color = Color.parseColor(if (pointerId >= 0) "#3A4066" else "#23232E")
+            paint.color = if (pointerId >= 0) PANEL_STICK_KNOB_ACTIVE else PANEL_KEY_FILL
             canvas.drawCircle(cx + knobX * (baseR - knobR), cy + knobY * (baseR - knobR), knobR, paint)
         }
 
@@ -2544,8 +2563,8 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
             val dp = resources.displayMetrics.density
             background = GradientDrawable().apply {
                 cornerRadius = 10f * dp
-                setColor(Color.parseColor("#17171F"))
-                setStroke((2f * dp).toInt(), Color.parseColor("#3A3A4A"))
+                setColor(PANEL_TOUCHPAD_FILL)
+                setStroke((2f * dp).toInt(), PANEL_TOUCHPAD_STROKE)
             }
             isClickable = true
             isFocusable = false
@@ -2621,7 +2640,7 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
             orientation = LinearLayout.HORIZONTAL
             tag = GAME_PANEL_TAG
             visibility = View.GONE
-            setBackgroundColor(Color.parseColor("#0F0F14"))
+            setBackgroundColor(Color.TRANSPARENT)
             val pad = (6f * dp).toInt()
             setPadding(pad, pad, pad, pad)
         }
@@ -2787,12 +2806,11 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
      *  again). Keys are deliberately smaller than the v1 game buttons. */
     private fun buildWinPanel(ctx: Context, ims: InputMethodService): LinearLayout {
         val dp = ctx.resources.displayMetrics.density
-        val accent = Color.parseColor("#7C8AFF")
         val panel = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             tag = WIN_PANEL_TAG
             visibility = View.GONE
-            setBackgroundColor(Color.parseColor("#0F0F14"))
+            setBackgroundColor(Color.TRANSPARENT)
             val pad = (5f * dp).toInt()
             setPadding(pad, pad, pad, pad)
         }
@@ -2816,15 +2834,15 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
                 setTextColor(Color.WHITE)
                 background = GradientDrawable().apply {
                     cornerRadius = 10f * dp
-                    setColor(Color.parseColor("#23232E"))
-                    setStroke((2f * dp).toInt(), accent)
+                    setColor(PANEL_KEY_FILL)
+                    setStroke((2f * dp).toInt(), PANEL_KEY_STROKE)
                 }
                 isClickable = true
                 isFocusable = false
             }
             fun paint() {
                 (b.background as? GradientDrawable)?.setColor(
-                    Color.parseColor(if (winLatch.contains(code)) "#3D4470" else "#23232E"))
+                    if (winLatch.contains(code)) PANEL_LATCH_FILL else PANEL_KEY_FILL)
             }
             paint()
             painters.add { paint() }
