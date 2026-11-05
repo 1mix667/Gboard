@@ -2667,7 +2667,7 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
      *  left stick, compact L3 under the stick, D-pad as a dense 3×3 grid;
      *  right = RB|RT row, ABXY as a dense 3×3 diamond, right stick, compact
      *  R3 under it; a narrow center column holds status + Back/Start + the
-     *  mouse buttons. */
+     *  mouse buttons, and — below them — a touchpad for mouse control. */
     private fun buildPadPanel(ctx: Context): LinearLayout {
         val dp = ctx.resources.displayMetrics.density
         fun colLp(weight: Float) = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, weight)
@@ -2788,6 +2788,20 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
                 { padSetMouseButton(GamepadProto.MOUSE_RIGHT, false) }),
             btnLp(1f, 30f))
         center.addView(mouseRow, rowLp(36f))
+        // Touchpad — mouse control in the middle of the pad, just below the
+        // ЛКМ/ПКМ row: drag moves the host pointer, tap = left click. Same
+        // TouchpadView + daemon link (virtual "Gboard+ Mouse") as the Win
+        // panel's touchpad; weight 1 fills the free space under the buttons.
+        val padTouch = TouchpadView(ctx)
+        padTouch.onDelta = { dx, dy -> padMoveMouse(dx, dy) }
+        padTouch.onTap = {
+            padSetMouseButton(GamepadProto.MOUSE_LEFT, true)
+            padSetMouseButton(GamepadProto.MOUSE_LEFT, false)
+        }
+        center.addView(padTouch, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f).apply {
+            val m = (3f * dp).toInt(); setMargins(m, m, m, m)
+        })
         panel.addView(center, colLp(0.62f))
 
         // ── Right zone ──
