@@ -133,20 +133,76 @@ class GamepadClient {
         try { onConnectionChanged?.invoke(v) } catch (_: Throwable) {}
     }
 
-    /** Send one state frame. Drops silently when not connected. A successful
-     *  write consumes the pending mouse deltas in [state] (they are one-shot
-     *  events, not state), so no later frame can re-send them. */
+    // ── Async writer ────────────────────────────────────────────────
+    // send() only marks the state dirty; ONE writer thread snapshots and
+    // writes at most one frame per WRITER_TICK_MS. Touch handlers run on
+    // the IME main thread, and the old design did a blocking socket
+    // write+flush per MotionEvent sample (dozens per drag event) right
+    // there — the main thread stalled, Android batched the samples, and
+    // the pointer arrived as rare huge jumps (lag, then one teleport).
+    // Mouse deltas accumulate in the state between writes, so coalescing
+    // loses no motion.
+    private val dirtySignal = Object()
+    @Volatile private var sendPending: Boolean = false
+    @Volatile private var writerThread: Thread? = null
+    @Volatile private var lastState: PadState? = null
+
+    /** Mark [state] for sending. The actual socket write happens on the
+     *  writer thread; a successful write consumes the pending mouse
+     *  deltas in [state] (they are one-shot events, not state), so no
+     *  later frame can re-send the same movement. */
     fun send(state: PadState) {
         if (!connected) return
-        val frame = state.toFrame()
+        lastState = state
+        synchronized(dirtySignal) {
+            sendPending = true
+            dirtySignal.notify()
+        }
+        ensureWriter()
+    }
+
+    private fun ensureWriter() {
+        if (writerThread?.isAlive == true) return
+        synchronized(this) {
+            if (writerThread?.isAlive == true) return
+            val t = Thread { writerLoop() }
+            t.isDaemon = true
+            t.name = "gbp-gamepad-writer"
+            writerThread = t
+            t.start()
+        }
+    }
+
+    private fun writerLoop() {
+        while (connected) {
+            synchronized(dirtySignal) {
+                while (connected && !sendPending) {
+                    try { dirtySignal.wait(100) } catch (_: InterruptedException) { return }
+                }
+                sendPending = false
+            }
+            if (!connected) break
+            writeFrame()
+            try { Thread.sleep(WRITER_TICK_MS) } catch (_: InterruptedException) { return }
+        }
+        writerThread = null
+    }
+
+    private fun writeFrame() {
+        val state = lastState ?: return
         synchronized(writeLock) {
             try {
                 val out = socket?.outputStream ?: throw IllegalStateException("no socket")
-                out.write(frame)
+                val rx = state.relX
+                val ry = state.relY
+                val wh = state.wheel
+                out.write(state.toFrame())
                 out.flush()
-                state.relX = 0
-                state.relY = 0
-                state.wheel = 0
+                // Subtract only what this frame carried; deltas queued
+                // concurrently by touch handlers stay pending.
+                state.relX -= rx
+                state.relY -= ry
+                state.wheel -= wh
             } catch (_: Throwable) {
                 try { socket?.close() } catch (_: Throwable) {}
                 socket = null
@@ -193,6 +249,13 @@ class GamepadClient {
             socket = null
         }
         setConnected(false)
+        // Wake the writer so it sees the disconnect and exits.
+        synchronized(dirtySignal) { dirtySignal.notifyAll() }
+    }
+
+    companion object {
+        /** Min interval between frames on the wire (~120 fps cap). */
+        private const val WRITER_TICK_MS = 8L
     }
 }
 

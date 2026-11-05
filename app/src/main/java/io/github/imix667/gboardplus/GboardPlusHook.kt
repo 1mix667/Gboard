@@ -2581,10 +2581,11 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
     }
 
     /** Touchpad for the Windows panel: one-finger drag moves the host
-     *  pointer (touch deltas scaled ×1.5, sent as they come, including
-     *  batched historical samples); a short tap without movement is a left
-     *  click. Movement goes through the daemon link (virtual "Gboard+
-     *  Mouse"), NOT the InputConnection. Single-pointer by design. */
+     *  pointer (touch deltas scaled ×2.5, historical samples coalesced
+     *  into ONE delta per MotionEvent); a short tap without movement is
+     *  a left click. Movement goes through the daemon link (virtual
+     *  "Gboard+ Mouse"), NOT the InputConnection. Single-pointer by
+     *  design. */
     private inner class TouchpadView(ctx: Context) : View(ctx) {
         var onDelta: ((Int, Int) -> Unit)? = null
         var onTap: (() -> Unit)? = null
@@ -2597,6 +2598,7 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
         private var downX = 0f
         private var downY = 0f
         private var moved = false
+        private var batching = false
 
         init {
             val dp = resources.displayMetrics.density
@@ -2614,9 +2616,13 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
             if (!moved && kotlin.math.abs(x - downX) + kotlin.math.abs(y - downY) > 8f * dp) {
                 moved = true
             }
-            accX += (x - lastX) * 1.5f
-            accY += (y - lastY) * 1.5f
+            accX += (x - lastX) * 2.5f
+            accY += (y - lastY) * 2.5f
             lastX = x; lastY = y
+            if (!batching) emitAcc()
+        }
+
+        private fun emitAcc() {
             val dx = accX.toInt(); val dy = accY.toInt()
             if (dx != 0 || dy != 0) {
                 accX -= dx; accY -= dy
@@ -2639,10 +2645,13 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
                     if (pointerId < 0) return true
                     val idx = ev.findPointerIndex(pointerId)
                     if (idx < 0) return true
+                    batching = true
                     for (h in 0 until ev.historySize) {
                         feed(ev.getHistoricalX(idx, h), ev.getHistoricalY(idx, h))
                     }
                     feed(ev.getX(idx), ev.getY(idx))
+                    batching = false
+                    emitAcc()
                     return true
                 }
                 MotionEvent.ACTION_UP -> {
