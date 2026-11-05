@@ -881,6 +881,38 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
         } catch (t: Throwable) {
             XposedBridge.log("$TAG [KB] onFinishInputView(shake) hook failed: ${t.message}")
         }
+
+        // Panel modes must not shove the app underneath around. With a
+        // gamepad/Win panel up over e.g. Parsec, the stock insets make
+        // Android resize/pan the target app by the keyboard's full height —
+        // the game view jumps up and squashes every time the panel opens.
+        // While a panel is active, report the keyboard as covering ZERO
+        // pixels (the same trick floating keyboards use): the IME window
+        // still draws normally, but the app below keeps its full-screen
+        // geometry. Normal typing (PANEL_NONE) passes the stock insets
+        // through untouched.
+        try {
+            XposedHelpers.findAndHookMethod(
+                imsClass, lpparam.classLoader, "onComputeInsets",
+                InputMethodService.Insets::class.java,
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (panelMode == PANEL_NONE) return
+                        val insets = param.args[0] as? InputMethodService.Insets ?: return
+                        val ims = param.thisObject as? InputMethodService ?: return
+                        try {
+                            val full = ims.resources?.displayMetrics?.heightPixels ?: 0
+                            if (full > 0) {
+                                insets.contentTopInsets = full
+                                insets.visibleTopInsets = full
+                            }
+                        } catch (_: Throwable) {}
+                    }
+                }
+            )
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG [KB] onComputeInsets hook failed: ${t.message}")
+        }
     }
 
     // ── Shake detection ──
@@ -3276,6 +3308,11 @@ class GboardPlusHook : IXposedHookLoadPackage, IXposedHookZygoteInit {
                 // be see-through, not just the panel (see applyPanelSeeThrough).
                 applyPanelSeeThrough(ims)
             }
+            // Mode changed while the keyboard may already be visible:
+            // force a layout pass so onComputeInsets re-runs NOW with the
+            // new panelMode (zero insets in panel modes, stock otherwise)
+            // instead of whenever Gboard next feels like laying out.
+            try { ims.window?.window?.decorView?.requestLayout() } catch (_: Throwable) {}
             XposedBridge.log("$TAG [GAME] panelMode=$mode")
         } catch (t: Throwable) {
             XposedBridge.log("$TAG [GAME] setPanelMode failed: $t")
